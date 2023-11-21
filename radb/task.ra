@@ -1,0 +1,43 @@
+// 1. Which pizzeria does Amy like to go
+\project_{pizzeria} \select_{name='Amy'} Frequents;
+
+// 2. How much do the pizzas cost in Pizza Hut
+\project_{price} \select_{pizzeria='Pizza Hut'} Serves;
+
+// 3. pizzeria that Ben and Amy both love to go to
+\project_{pizzeria} \select_{name='Amy'} Frequents
+\intersect
+\project_{pizzeria} \select_{name='Ben'} Frequents;
+
+// 4. all pizzas eaten by at least one female over the age of 20.
+\project_{pizza} (
+Eats \join \project_{name} \select_{gender='female' and age > 20} Person
+);
+
+// 5. names of all females who eat at least one pizza served by Straw Hat
+\project_{name} (
+(\select_{gender='female'} Person \join Eats)
+\join \select_{pizzeria='Straw Hat'} Serves
+);
+
+// 6. all pizzerias that serve at least one pizza for less than $10 that either Amy or Fay eat
+\project_{pizzeria} (
+(\select_{name='Amy' or name='Fay'} Person \join Eats)
+\join \select_{price < 10} Serves
+);
+
+// 7. the age of the oldest person (or people) who eat mushroom pizza.
+\aggr_{max(age)}
+\project_{age} (\select_{pizza='mushroom'} Eats \join Person);
+
+// 8. all pizzas that are eaten only by people younger than 24, or that cost less than $10 everywhere they are served.
+\project_{pizza} 
+Serves \diff \project_{pizza} (
+\select_{age >= 24} Person \join Eats
+\join \select_{price >= 10} Serves
+);
+
+// 9. Find all pizzerias that serve every pizza eaten by people over 30.
+\project_{pizzeria}
+\project_{pizza} ((\select_{age > 30} Person) \join Eats)
+\join Serves;
