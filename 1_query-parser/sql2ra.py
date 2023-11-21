@@ -23,17 +23,23 @@ def translate(stmt: sql.Statement) -> ast.Project:
                 cur_clause.append(tkn)
         else:
             cur_clause.append(tkn)
-    # print(clauses)
 
+    input = from_parser(clause=clauses["from"])
+    input = where_parser(clause=clauses["where"], input=input)
+    input = select_parser(clause=clauses["select"], input=input)
+
+    return input
+
+
+def from_parser(clause: list[tokens.Token]) -> ast.RelExpr:
     """
     Parse `From` Clause
     1. Check alias, `AS` is omitted
-    Alias: Original Name
     2. Get Relations
     """
     rels: list[ast.RelRef] = []
     temp: list[tokens.Token] = []
-    for tkn in clauses["from"]:
+    for tkn in clause:
         if not tkn.ttype in tokens.Punctuation:
             temp.append(tkn)
         else:
@@ -64,15 +70,18 @@ def translate(stmt: sql.Statement) -> ast.Project:
     for i in range(len(rels) - 1):
         input = ast.Cross(input, rels[i + 1])
 
+    return input
+
+
+def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
     """
     Parse `Where` Clause
-    Clause -> Condition -> Attribute
+    attributes -> condition -> condition2 -> clause
     """
-    # print(clauses["where"])
     temp_tkns: list[tokens.Token] = []
     temp_attrs: list[ast.AttrRef | ast.RAString | ast.RANumber | int] = []
     temp_attrs_2: list[ast.ValExprBinaryOp | int] = []
-    for tkn in clauses["where"]:
+    for tkn in clause:
         if tkn.ttype in tokens.Keyword or tkn.ttype in tokens.Operator:
             match len(temp_tkns):
                 case 1:
@@ -146,13 +155,16 @@ def translate(stmt: sql.Statement) -> ast.Project:
                 )
         input = ast.Select(cond=cond, input=input)
 
+    return input
+
+
+def select_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
     """
     Parse `Select` Clause
     """
-    # print(clauses["select"])
     attrs: list[ast.AttrRef] = []
     temp: list[tokens.Token] = []
-    for tkn in clauses["select"]:
+    for tkn in clause:
         if tkn.ttype in tokens.Keyword:
             match tkn.value.upper():
                 case "DISTINCT":
@@ -182,23 +194,13 @@ def translate(stmt: sql.Statement) -> ast.Project:
     return input
 
 
-def test_select_node():
-    condition = ast.ValExprBinaryOp(
-        ast.AttrRef(rel="person", name="age"), ast.sym.LE, ast.RANumber("10")
-    )
-    relation = ast.RelRef("person")
-    return ast.Select(cond=condition, input=relation)
-
-
 if __name__ == "__main__":
-    sqlstmt = "select distinct name from person where gender='female'"
-    stmt = sqlparse.parse(sqlstmt)[0]
+    statements = [
+        "select distinct name from person where gender='female'",
+        "select distinct T1.a, T2.b from Test1 T1, Test2 T2 where T1.foo = T2.bar and 'foo' = T2.bar",
+        "select distinct * from Person, Eats where Person.name = Eats.name",
+    ]
 
-    sqlstmt2 = "select distinct T1.a, T2.b from Test1 T1, Test2 T2 where T1.foo = T2.bar and 'foo' = T2.bar"
-    stmt2 = sqlparse.parse(sqlstmt2)[0]
-
-    sqlstmt3 = "select distinct * from Person, Eats where Person.name = Eats.name"
-    stmt3 = sqlparse.parse(sqlstmt3)[0]
-
-    ra = translate(stmt)
-    print(ra)
+    for stmt in statements:
+        ra = translate(sqlparse.parse(stmt)[0])
+        print(ra)
