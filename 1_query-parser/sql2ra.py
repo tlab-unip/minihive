@@ -2,6 +2,7 @@ import sqlparse
 import sqlparse.tokens as tokens
 import sqlparse.sql as sql
 import radb
+import radb.parse
 import radb.ast as ast
 
 
@@ -30,25 +31,38 @@ def translate(stmt: sql.Statement) -> ast.Project:
     Alias: Original Name
     2. Get Relations
     """
-    alias: dict[tokens.Token, tokens.Token] = {}
+    rels: list[ast.RelRef] = []
     temp: list[tokens.Token] = []
     for tkn in clauses["from"]:
         if not tkn.ttype in tokens.Punctuation:
             temp.append(tkn)
         else:
             if len(temp) == 2:
-                alias[temp[1]] = temp[0]
+                rels.append(
+                    ast.Rename(
+                        relname=temp[1].value,
+                        attrnames=None,
+                        input=ast.RelRef(rel=temp[0].value),
+                    )
+                )
             elif len(temp) == 1:
-                alias[temp[0]] = None
+                rels.append(ast.RelRef(rel=temp[0].value))
             temp.clear()
     if len(temp) == 2:
-        alias[temp[1]] = temp[0]
+        rels.append(
+            ast.Rename(
+                relname=temp[1].value,
+                attrnames=None,
+                input=ast.RelRef(rel=temp[0].value),
+            )
+        )
     elif len(temp) == 1:
-        alias[temp[0]] = None
+        rels.append(ast.RelRef(rel=temp[0].value))
     temp.clear()
 
-    # print(alias)
-    input = ast.RelExpr(inputs=[ast.RelRef(x.value) for x in alias.keys()])
+    input = rels[0]
+    for i in range(len(rels) - 1):
+        input = ast.Cross(input, rels[i + 1])
 
     """
     Parse `Where` Clause
@@ -57,7 +71,7 @@ def translate(stmt: sql.Statement) -> ast.Project:
     # print(clauses["where"])
     temp_tkns: list[tokens.Token] = []
     temp_attrs: list[ast.AttrRef | ast.RAString | ast.RANumber | int] = []
-    temp_conds: list[ast.ValExpr] = []
+    temp_attrs_2: list[ast.ValExprBinaryOp | int] = []
     for tkn in clauses["where"]:
         if tkn.ttype in tokens.Keyword or tkn.ttype in tokens.Operator:
             match len(temp_tkns):
@@ -94,11 +108,17 @@ def translate(stmt: sql.Statement) -> ast.Project:
                         op = ast.sym.GE
                 temp_attrs.append(op)
 
-        elif tkn.value.upper() == "AND":
+        else:
+            op = None
+            match tkn.value.upper():
+                case "AND":
+                    op = ast.sym.AND
+
             if len(temp_attrs) == 3:
-                temp_conds.append(
+                temp_attrs_2.append(
                     ast.ValExprBinaryOp(temp_attrs[0], temp_attrs[1], temp_attrs[2])
                 )
+                temp_attrs_2.append(op)
                 temp_attrs.clear()
             else:
                 print("Condition Failed", temp_attrs)
@@ -112,15 +132,19 @@ def translate(stmt: sql.Statement) -> ast.Project:
             )
     temp_tkns.clear()
     if len(temp_attrs) == 3:
-        temp_conds.append(
+        temp_attrs_2.append(
             ast.ValExprBinaryOp(temp_attrs[0], temp_attrs[1], temp_attrs[2])
         )
         temp_attrs.clear()
 
-    if len(temp_conds) != 0:
-        cond = ast.ValExpr(inputs=temp_conds)
+    if len(temp_attrs_2) != 0:
+        cond = temp_attrs_2[0]
+        if len(temp_attrs_2) >= 3:
+            for i in range(0, len(temp_attrs_2), 3):
+                cond = ast.ValExprBinaryOp(
+                    cond, temp_attrs_2[i + 1], temp_attrs_2[i + 2]
+                )
         input = ast.Select(cond=cond, input=input)
-    # print(input.to_json())
 
     """
     Parse `Select` Clause
@@ -134,6 +158,8 @@ def translate(stmt: sql.Statement) -> ast.Project:
                 case "DISTINCT":
                     pass
             continue
+        elif tkn.ttype in tokens.Wildcard:
+            break
         elif tkn.ttype in tokens.Punctuation and tkn.value == ",":
             match len(temp):
                 case 1:
@@ -171,5 +197,8 @@ if __name__ == "__main__":
     sqlstmt2 = "select distinct T1.a, T2.b from Test1 T1, Test2 T2 where T1.foo = T2.bar and 'foo' = T2.bar"
     stmt2 = sqlparse.parse(sqlstmt2)[0]
 
-    ra = translate(stmt2)
-    print(ra.to_json())
+    sqlstmt3 = "select distinct * from Person, Eats where Person.name = Eats.name"
+    stmt3 = sqlparse.parse(sqlstmt3)[0]
+
+    ra = translate(stmt)
+    print(ra)
