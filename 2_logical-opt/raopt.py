@@ -25,9 +25,12 @@ def rule_break_up_selections(ra: ast.RelExpr) -> ast.RelExpr:
                 cond = node.cond
 
             # Replace input node in parent
-            for i, input in enumerate(parent.inputs):
-                if origin == parent.inputs[i]:
-                    parent.inputs[i] = node
+            if parent != None:
+                for i, _input in enumerate(parent.inputs):
+                    if origin == parent.inputs[i]:
+                        parent.inputs[i] = node
+            else:
+                ra = node
 
     return ra
 
@@ -50,7 +53,7 @@ def rule_push_down_selections(
         if type(node) == ast.Select:
             origin = node
             cond = node.cond
-            attrs_cond: list[ast.AttrRef] = cond.inputs
+            attrs_cond: list[ast.AttrRef | ast.RAString | ast.RANumber] = cond.inputs
             print([str(x) for x in attrs_cond])
 
             parent_record2: dict[ast.RelExpr, ast.RelExpr] = {node: parent}
@@ -60,49 +63,78 @@ def rule_push_down_selections(
                 for input in node.inputs:
                     parent_record2[input] = node
                     print("Input: ", input)
-                    attrs = []
                     match type(input):
                         case ast.RelRef:
                             rel = str(input)
-                            attrs += [
+                            attrs = [
                                 attr
                                 for attr in attrs_cond
-                                if (attr.rel == rel or attr.rel == None)
+                                if type(attr) == ast.AttrRef
+                                and (attr.rel == rel or attr.rel == None)
                                 and attr.name in dd[rel].keys()
                             ]
-                        case ast.Cross:
-                            rels = [
-                                str(x) for x in input.inputs if type(x) == ast.RelRef
+                            if len(attrs) == 0:
+                                continue
+                        case ast.Rename:
+                            dd[input.relname] = dd[str(input.inputs[0])]
+                            attrs = [
+                                attr
+                                for attr in attrs_cond
+                                if type(attr) == ast.AttrRef
+                                and (attr.rel == input.relname or attr.rel == None)
+                                and attr.name in dd[input.relname].keys()
                             ]
-                            for rel in rels:
-                                attrs += [
+                            if len(attrs) == 0:
+                                continue
+                        case ast.Cross:
+                            rels = []
+                            for rel in input.inputs:
+                                match type(rel):
+                                    case ast.RelRef:
+                                        rels.append(str(rel))
+                                    case ast.Rename:
+                                        dd[rel.relname] = dd[str(rel.inputs[0])]
+                                        rels.append(rel.relname)
+                            if len(rels) == 2:
+                                attrs1 = [
                                     attr
                                     for attr in attrs_cond
-                                    if (attr.rel == rel or attr.rel == None)
-                                    and attr.name in dd[rel].keys()
+                                    if type(attr) == ast.AttrRef
+                                    and (attr.rel == rels[0] or attr.rel == None)
+                                    and attr.name in dd[rels[0]].keys()
                                 ]
-                    if len(attrs) == 0:
-                        queue.append(input)
+                                attrs2 = [
+                                    attr
+                                    for attr in attrs_cond
+                                    if type(attr) == ast.AttrRef
+                                    and (attr.rel == rels[1] or attr.rel == None)
+                                    and attr.name in dd[rels[1]].keys()
+                                ]
+                                if len(attrs1) == 0 or len(attrs2) == 0:
+                                    queue.append(input)
+                                    continue
+                            else:
+                                queue.append(input)
+                                continue
+
+                    new_parent = parent_record2[input]
+                    node = ast.Select(cond=cond, input=input)
+                    print("Node: ", node)
+                    # Replace input parent's child with new select node
+                    for i, _input in enumerate(new_parent.inputs):
+                        if input == new_parent.inputs[i]:
+                            new_parent.inputs[i] = node
+                    if input in parent_record.keys():
+                        parent_record[input] = node
+                    # Replace origin parent's child with origin's child
+                    if parent != None:
+                        for i, _input in enumerate(parent.inputs):
+                            if origin == parent.inputs[i]:
+                                parent.inputs[i] = origin.inputs[0]
                     else:
-                        new_parent = parent_record2[input]
-                        node = ast.Select(cond=cond, input=input)
-                        print("Attrs: ", [str(x) for x in attrs])
-                        print("Node: ", node)
-                        # Replace input parent's child with new select node
-                        for i, _input in enumerate(new_parent.inputs):
-                            if input == new_parent.inputs[i]:
-                                new_parent.inputs[i] = node
-                        if input in parent_record.keys():
-                            parent_record[input] = node
-                        # Replace origin parent's child with origin's child
-                        if parent != None:
-                            for i, _input in enumerate(parent.inputs):
-                                if origin == parent.inputs[i]:
-                                    parent.inputs[i] = origin.inputs[0]
-                        else:
-                            ra = origin.inputs[0]
-                        if origin.inputs[0] in parent_record.keys():
-                            parent_record[origin.inputs[0]] = parent
+                        ra = origin.inputs[0]
+                    if origin.inputs[0] in parent_record.keys():
+                        parent_record[origin.inputs[0]] = parent
 
     return ra
 
@@ -127,8 +159,11 @@ if __name__ == "__main__":
     # ra = parse.one_statement_from_string(stmt)
     # result = rule_break_up_selections(ra)
 
-    stmt2 = """\select_{Eats.pizza = Serves.pizza} \select_{Person.name = Eats.name}
-                ((Person \cross Eats) \cross Serves);"""
+    # stmt2 = """\select_{Eats.pizza = Serves.pizza} \select_{Person.name = Eats.name}
+    #             ((Person \cross Eats) \cross Serves);"""
+    stmt2 = "\select_{price < 10} ((Person \cross Eats) \cross Serves);"
+    # stmt2 = """\select_{Eats1.pizza = Eats2.pizza} \select_{Eats2.name = 'Amy'} (\\rename_{Eats1: *}(Eats)
+    #                    \cross \\rename_{Eats2: *}(Eats));"""
     ra2 = parse.one_statement_from_string(stmt2)
     result2 = rule_push_down_selections(ra2, dd)
 
