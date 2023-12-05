@@ -54,7 +54,7 @@ def rule_push_down_selections(
             origin = node
             cond = node.cond
             attrs_cond: list[ast.AttrRef | ast.RAString | ast.RANumber] = cond.inputs
-            print([str(x) for x in attrs_cond])
+            # print([str(x) for x in attrs_cond])
 
             parent_record2: dict[ast.RelExpr, ast.RelExpr] = {node: parent}
             queue = [node]
@@ -62,7 +62,7 @@ def rule_push_down_selections(
                 node = queue.pop(0)
                 for input in node.inputs:
                     parent_record2[input] = node
-                    print("Input: ", input)
+                    # print("Input: ", input)
                     match type(input):
                         case ast.RelRef:
                             rel = str(input)
@@ -119,7 +119,7 @@ def rule_push_down_selections(
 
                     new_parent = parent_record2[input]
                     node = ast.Select(cond=cond, input=input)
-                    print("Node: ", node)
+                    # print("Node: ", node)
                     # Replace input parent's child with new select node
                     for i, _input in enumerate(new_parent.inputs):
                         if input == new_parent.inputs[i]:
@@ -176,7 +176,34 @@ def rule_merge_selections(ra: ast.RelExpr) -> ast.RelExpr:
 
 
 def rule_introduce_joins(ra: ast.RelExpr) -> ast.RelExpr:
-    pass
+    # child, parent
+    parent_record: dict[ast.RelExpr, ast.RelExpr] = {ra: None}
+    while len(parent_record) > 0:
+        node = list(parent_record.keys())[0]
+        parent = parent_record.pop(node)
+
+        for input in node.inputs:
+            parent_record[input] = node
+        # Find a selection
+        if type(node) == ast.Select:
+            origin = node
+            cond = node.cond
+
+            input = node.inputs[0]
+            if type(input) == ast.Cross:
+                node = ast.Join(left=input.inputs[0], cond=cond, right=input.inputs[1])
+                # print(node)
+
+                # Replace input node in parent
+                if parent != None:
+                    for i, _input in enumerate(parent.inputs):
+                        if origin == parent.inputs[i]:
+                            parent.inputs[i] = node
+                else:
+                    ra = node
+                parent_record[node] = parent
+
+    return ra
 
 
 if __name__ == "__main__":
@@ -196,9 +223,10 @@ if __name__ == "__main__":
     #                    \cross \\rename_{Eats2: *}(Eats));"""
 
     # stmt = "Pizzeria \cross (\select_{pizza = 'mushroom'} \select_{price = 10} Serves);"
-    stmt = "\select_{name = 'Amy'} \select_{gender = 'f'} \select_{age = 16} Person;"
+    # stmt = "\select_{name = 'Amy'} \select_{gender = 'f'} \select_{age = 16} Person;"
+    stmt = """\select_{Eats.pizza = Serves.pizza}((\select_{Person.name = Eats.name}
+                       (Person \cross Eats)) \cross Serves);"""
 
     ra = parse.one_statement_from_string(stmt)
-    print(ra)
-    result = rule_merge_selections(ra)
+    result = rule_introduce_joins(ra)
     print(result)
