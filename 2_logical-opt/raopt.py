@@ -140,7 +140,39 @@ def rule_push_down_selections(
 
 
 def rule_merge_selections(ra: ast.RelExpr) -> ast.RelExpr:
-    pass
+    # child, parent
+    parent_record: dict[ast.RelExpr, ast.RelExpr] = {ra: None}
+    while len(parent_record) > 0:
+        node = list(parent_record.keys())[0]
+        parent = parent_record.pop(node)
+
+        for input in node.inputs:
+            parent_record[input] = node
+
+        if type(node) == ast.Select:
+            conds = []
+            origin = node
+
+            while type(node) == ast.Select:
+                conds.append(node.cond)
+                node = node.inputs[0]
+
+            cond = conds.pop(0)
+            while len(conds) > 0:
+                cond = ast.ValExprBinaryOp(
+                    left=cond, op=parse.RAParser.AND, right=conds.pop(0)
+                )
+            node = ast.Select(cond=cond, input=node)
+
+            # Replace input node in parent
+            if parent != None:
+                for i, _input in enumerate(parent.inputs):
+                    if origin == parent.inputs[i]:
+                        parent.inputs[i] = node
+            else:
+                ra = node
+
+    return ra
 
 
 def rule_introduce_joins(ra: ast.RelExpr) -> ast.RelExpr:
@@ -156,15 +188,17 @@ if __name__ == "__main__":
 
     # stmt = """Eats \cross \select_{Person.gender='f' and Person.age=16 and Person.firstName = 'first' and Person.lastName = 'last'}
     #             (Person \cross \select_{Serves.name = 'pizza' and Serves.price = 10 } Serves);"""
-    # ra = parse.one_statement_from_string(stmt)
-    # result = rule_break_up_selections(ra)
 
-    # stmt2 = """\select_{Eats.pizza = Serves.pizza} \select_{Person.name = Eats.name}
+    # stmt = """\select_{Eats.pizza = Serves.pizza} \select_{Person.name = Eats.name}
     #             ((Person \cross Eats) \cross Serves);"""
-    stmt2 = "\select_{price < 10} ((Person \cross Eats) \cross Serves);"
-    # stmt2 = """\select_{Eats1.pizza = Eats2.pizza} \select_{Eats2.name = 'Amy'} (\\rename_{Eats1: *}(Eats)
+    # stmt = "\select_{price < 10} ((Person \cross Eats) \cross Serves);"
+    # stmt = """\select_{Eats1.pizza = Eats2.pizza} \select_{Eats2.name = 'Amy'} (\\rename_{Eats1: *}(Eats)
     #                    \cross \\rename_{Eats2: *}(Eats));"""
-    ra2 = parse.one_statement_from_string(stmt2)
-    result2 = rule_push_down_selections(ra2, dd)
 
-    print(result2)
+    # stmt = "Pizzeria \cross (\select_{pizza = 'mushroom'} \select_{price = 10} Serves);"
+    stmt = "\select_{name = 'Amy'} \select_{gender = 'f'} \select_{age = 16} Person;"
+
+    ra = parse.one_statement_from_string(stmt)
+    print(ra)
+    result = rule_merge_selections(ra)
+    print(result)
