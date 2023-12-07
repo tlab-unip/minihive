@@ -43,6 +43,7 @@ def rule_push_down_selections(
     """
     # child, parent
     parent_record: dict[ast.RelExpr, ast.RelExpr] = {ra: None}
+    complete: set[ast.Select] = set()
     while len(parent_record) > 0:
         node = list(parent_record.keys())[0]
         parent = parent_record.pop(node)
@@ -51,10 +52,12 @@ def rule_push_down_selections(
             parent_record[input] = node
         # Find a selection
         if type(node) == ast.Select:
+            if node in complete:
+                continue
             origin = node
             cond = node.cond
             attrs_cond: list[ast.AttrRef | ast.RAString | ast.RANumber] = cond.inputs
-            # print([str(x) for x in attrs_cond])
+            # print("Attrs: ", [str(x) for x in attrs_cond])
 
             parent_record2: dict[ast.RelExpr, ast.RelExpr] = {node: parent}
             queue = [node]
@@ -63,69 +66,97 @@ def rule_push_down_selections(
                 for input in node.inputs:
                     parent_record2[input] = node
                     # print("Input: ", input)
+                    attrs = []
                     match type(input):
                         case ast.RelRef:
                             rel = str(input)
-                            attrs = [
+                            attrs += [
                                 attr
                                 for attr in attrs_cond
                                 if type(attr) == ast.AttrRef
                                 and (attr.rel == rel or attr.rel == None)
                                 and attr.name in dd[rel].keys()
                             ]
-                            if len(attrs) == 0:
-                                continue
                         case ast.Rename:
                             dd[input.relname] = dd[str(input.inputs[0])]
-                            attrs = [
+                            attrs += [
                                 attr
                                 for attr in attrs_cond
                                 if type(attr) == ast.AttrRef
                                 and (attr.rel == input.relname or attr.rel == None)
                                 and attr.name in dd[input.relname].keys()
                             ]
-                            if len(attrs) == 0:
-                                continue
                         case ast.Cross:
-                            rels = []
-                            for rel in input.inputs:
-                                match type(rel):
+                            attrs1 = []
+                            attrs2 = []
+                            left_rels = []
+                            right_rels = []
+                            left_queue: list[ast.RelExpr] = [input.inputs[0]]
+                            right_queue: list[ast.RelExpr] = [input.inputs[1]]
+                            while len(left_queue) > 0:
+                                child = left_queue.pop(0)
+                                match type(child):
                                     case ast.RelRef:
-                                        rels.append(str(rel))
+                                        left_rels.append(str(child))
                                     case ast.Rename:
-                                        dd[rel.relname] = dd[str(rel.inputs[0])]
-                                        rels.append(rel.relname)
-                            if len(rels) == 2:
-                                attrs1 = [
+                                        dd[child.relname] = dd[str(child.inputs[0])]
+                                        left_rels.append(child.relname)
+                                    case _:
+                                        left_queue += child.inputs
+                            while len(right_queue) > 0:
+                                child = right_queue.pop(0)
+                                match type(child):
+                                    case ast.RelRef:
+                                        right_rels.append(str(child))
+                                    case ast.Rename:
+                                        dd[child.relname] = dd[str(child.inputs[0])]
+                                        right_rels.append(child.relname)
+                                    case _:
+                                        right_queue += child.inputs
+
+                            # Test if both attributes appear
+                            for rel in left_rels:
+                                attrs1 += [
                                     attr
                                     for attr in attrs_cond
                                     if type(attr) == ast.AttrRef
-                                    and (attr.rel == rels[0] or attr.rel == None)
-                                    and attr.name in dd[rels[0]].keys()
+                                    and (attr.rel == rel or attr.rel == None)
+                                    and attr.name in dd[rel].keys()
                                 ]
-                                attrs2 = [
+                            for rel in right_rels:
+                                attrs2 += [
                                     attr
                                     for attr in attrs_cond
                                     if type(attr) == ast.AttrRef
-                                    and (attr.rel == rels[1] or attr.rel == None)
-                                    and attr.name in dd[rels[1]].keys()
+                                    and (attr.rel == rel or attr.rel == None)
+                                    and attr.name in dd[rel].keys()
                                 ]
-                                if len(attrs1) == 0 or len(attrs2) == 0:
-                                    queue.append(input)
-                                    continue
-                            else:
+                            # print(
+                            #     "Attrs1: ",
+                            #     [str(x) for x in attrs1],
+                            #     "Attrs2: ",
+                            #     [str(x) for x in attrs2],
+                            # )
+                            if len(attrs1) == 0 or len(attrs2) == 0:
                                 queue.append(input)
                                 continue
+                            else:
+                                attrs.append(attrs1)
+                                attrs.append(attrs2)
+                    if len(attrs) == 0:
+                        queue.append(input)
+                        continue
 
                     new_parent = parent_record2[input]
-                    node = ast.Select(cond=cond, input=input)
-                    # print("Node: ", node)
+                    new_node = ast.Select(cond=cond, input=input)
+                    # print("Node: ", new_node, "\n")
                     # Replace input parent's child with new select node
                     for i, _input in enumerate(new_parent.inputs):
                         if input == new_parent.inputs[i]:
-                            new_parent.inputs[i] = node
+                            new_parent.inputs[i] = new_node
                     if input in parent_record.keys():
-                        parent_record[input] = node
+                        parent_record[input] = new_node
+
                     # Replace origin parent's child with origin's child
                     if parent != None:
                         for i, _input in enumerate(parent.inputs):
@@ -135,6 +166,8 @@ def rule_push_down_selections(
                         ra = origin.inputs[0]
                     if origin.inputs[0] in parent_record.keys():
                         parent_record[origin.inputs[0]] = parent
+
+                    complete.add(new_node)
 
     return ra
 
@@ -213,20 +246,10 @@ if __name__ == "__main__":
     dd["Serves"] = {"pizzeria": "string", "pizza": "string", "price": "integer"}
     dd["Frequents"] = {"name": "string", "pizzeria": "string"}
 
-    # stmt = """Eats \cross \select_{Person.gender='f' and Person.age=16 and Person.firstName = 'first' and Person.lastName = 'last'}
-    #             (Person \cross \select_{Serves.name = 'pizza' and Serves.price = 10 } Serves);"""
-
-    # stmt = """\select_{Eats.pizza = Serves.pizza} \select_{Person.name = Eats.name}
-    #             ((Person \cross Eats) \cross Serves);"""
-    # stmt = "\select_{price < 10} ((Person \cross Eats) \cross Serves);"
-    # stmt = """\select_{Eats1.pizza = Eats2.pizza} \select_{Eats2.name = 'Amy'} (\\rename_{Eats1: *}(Eats)
-    #                    \cross \\rename_{Eats2: *}(Eats));"""
-
-    # stmt = "Pizzeria \cross (\select_{pizza = 'mushroom'} \select_{price = 10} Serves);"
-    # stmt = "\select_{name = 'Amy'} \select_{gender = 'f'} \select_{age = 16} Person;"
-    stmt = """\select_{Eats.pizza = Serves.pizza}((\select_{Person.name = Eats.name}
-                       (Person \cross Eats)) \cross Serves);"""
-
+    stmt = "\project_{P1.name, P2.name} \select_{P1.age = 16 and P2.age = 16 and P1.name = P2.name} ((\\rename_{P1: *} Person) \cross (\\rename_{P2: *} Person));"
     ra = parse.one_statement_from_string(stmt)
-    result = rule_introduce_joins(ra)
-    print(result)
+    ra = rule_break_up_selections(ra)
+    ra = rule_push_down_selections(ra, dd)
+    ra = rule_merge_selections(ra)
+    ra = rule_introduce_joins(ra)
+    print(ra)
