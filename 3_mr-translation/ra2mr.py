@@ -5,12 +5,12 @@ import luigi.contrib.hadoop
 import luigi.contrib.hdfs
 from luigi.mock import MockTarget
 import radb
-import radb.ast
-import radb.parse
+import radb.ast as ast
+import radb.parse as parse
 
-'''
+"""
 Control where the input data comes from, and where output data should go.
-'''
+"""
 
 
 class ExecEnv(Enum):
@@ -19,9 +19,9 @@ class ExecEnv(Enum):
     MOCK = 3  # read/write mock data to an in-memory file system.
 
 
-'''
+"""
 Switches between different execution environments and file systems.
-'''
+"""
 
 
 class OutputMixin(luigi.Task):
@@ -43,16 +43,19 @@ class InputData(OutputMixin):
         return self.get_output(self.filename)
 
 
-'''
+"""
 Counts the number of steps / luigi tasks that we need for evaluating this query.
-'''
+"""
 
 
 def count_steps(raquery):
-    assert (isinstance(raquery, radb.ast.Node))
+    assert isinstance(raquery, radb.ast.Node)
 
-    if (isinstance(raquery, radb.ast.Select) or isinstance(raquery, radb.ast.Project) or
-            isinstance(raquery, radb.ast.Rename)):
+    if (
+        isinstance(raquery, radb.ast.Select)
+        or isinstance(raquery, radb.ast.Project)
+        or isinstance(raquery, radb.ast.Rename)
+    ):
         return 1 + count_steps(raquery.inputs[0])
 
     elif isinstance(raquery, radb.ast.Join):
@@ -62,28 +65,31 @@ def count_steps(raquery):
         return 1
 
     else:
-        raise Exception("count_steps: Cannot handle operator " + str(type(raquery)) + ".")
+        raise Exception(
+            "count_steps: Cannot handle operator " + str(type(raquery)) + "."
+        )
 
 
 class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
-    '''
+    """
     Each physical operator knows its (partial) query string.
     As a string, the value of this parameter can be searialized
     and shipped to the data node in the Hadoop cluster.
-    '''
+    """
+
     querystring = luigi.Parameter()
 
-    '''
+    """
     Each physical operator within a query has its own step-id.
     This is used to rename the temporary files for exhanging
     data between chained MapReduce jobs.
-    '''
+    """
     step = luigi.IntParameter(default=1)
 
-    '''
+    """
     In HDFS, we call the folders for temporary data tmp1, tmp2, ...
     In the local or mock file system, we call the files tmp1.tmp...
-    '''
+    """
 
     def output(self):
         if self.exec_environment == ExecEnv.HDFS:
@@ -93,17 +99,19 @@ class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
         return self.get_output(filename)
 
 
-'''
+"""
 Given the radb-string representation of a relational algebra query,
 this produces a tree of luigi tasks with the physical query operators.
-'''
+"""
 
 
 def task_factory(raquery, step=1, env=ExecEnv.HDFS):
-    assert (isinstance(raquery, radb.ast.Node))
+    assert isinstance(raquery, radb.ast.Node)
 
     if isinstance(raquery, radb.ast.Select):
-        return SelectTask(querystring=str(raquery) + ";", step=step, exec_environment=env)
+        return SelectTask(
+            querystring=str(raquery) + ";", step=step, exec_environment=env
+        )
 
     elif isinstance(raquery, radb.ast.RelRef):
         filename = raquery.rel + ".json"
@@ -113,10 +121,14 @@ def task_factory(raquery, step=1, env=ExecEnv.HDFS):
         return JoinTask(querystring=str(raquery) + ";", step=step, exec_environment=env)
 
     elif isinstance(raquery, radb.ast.Project):
-        return ProjectTask(querystring=str(raquery) + ";", step=step, exec_environment=env)
+        return ProjectTask(
+            querystring=str(raquery) + ";", step=step, exec_environment=env
+        )
 
     elif isinstance(raquery, radb.ast.Rename):
-        return RenameTask(querystring=str(raquery) + ";", step=step, exec_environment=env)
+        return RenameTask(
+            querystring=str(raquery) + ";", step=step, exec_environment=env
+        )
 
     else:
         # We will not evaluate the Cross product on Hadoop, too expensive.
@@ -124,109 +136,158 @@ def task_factory(raquery, step=1, env=ExecEnv.HDFS):
 
 
 class JoinTask(RelAlgQueryTask):
-
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
-        assert (isinstance(raquery, radb.ast.Join))
+        assert isinstance(raquery, radb.ast.Join)
 
-        task1 = task_factory(raquery.inputs[0], step=self.step + 1, env=self.exec_environment)
-        task2 = task_factory(raquery.inputs[1], step=self.step + count_steps(raquery.inputs[0]) + 1,
-                             env=self.exec_environment)
+        task1 = task_factory(
+            raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+        )
+        task2 = task_factory(
+            raquery.inputs[1],
+            step=self.step + count_steps(raquery.inputs[0]) + 1,
+            env=self.exec_environment,
+        )
 
         return [task1, task2]
 
     def mapper(self, line):
-        relation, tuple = line.split('\t')
+        relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
         raquery = radb.parse.one_statement_from_string(self.querystring)
         condition = raquery.cond
 
-        ''' ...................... fill in your code below ........................'''
+        """ ...................... fill in your code below ........................"""
 
         yield ("foo", "bar")
 
-        ''' ...................... fill in your code above ........................'''
+        """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
         raquery = radb.parse.one_statement_from_string(self.querystring)
 
-        ''' ...................... fill in your code below ........................'''
+        """ ...................... fill in your code below ........................"""
 
         yield ("foo", "bar")
 
-        ''' ...................... fill in your code above ........................'''
+        """ ...................... fill in your code above ........................"""
 
 
 class SelectTask(RelAlgQueryTask):
-
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
-        assert (isinstance(raquery, radb.ast.Select))
+        assert isinstance(raquery, radb.ast.Select)
 
-        return [task_factory(raquery.inputs[0], step=self.step + 1, env=self.exec_environment)]
+        return [
+            task_factory(
+                raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+            )
+        ]
 
-    def mapper(self, line):
-        relation, tuple = line.split('\t')
-        json_tuple = json.loads(tuple)
+    def mapper(self, line: str):
+        relation, tuple = line.split("\t")
+        json_tuple: dict = json.loads(tuple)
 
-        condition = radb.parse.one_statement_from_string(self.querystring).cond
+        condition: ast.ValExprBinaryOp = radb.parse.one_statement_from_string(
+            self.querystring
+        ).cond
 
-        ''' ...................... fill in your code below ........................'''
+        """ ...................... fill in your code below ........................"""
+        left, right = condition.inputs
+        cond_attr = left if isinstance(left, ast.AttrRef) else right
+        cond_val = (
+            left
+            if isinstance(left, ast.RANumber) or isinstance(left, ast.RAString)
+            else right
+        ).val.strip("'")
 
-        yield ("foo", "bar")
+        if cond_attr.rel is not None and cond_attr.rel != relation:
+            return
 
-        ''' ...................... fill in your code above ........................'''
+        val = json_tuple.get(relation + "." + cond_attr.name)
+        if str(val) == cond_val:
+            yield (relation, tuple)
+        # else:
+        #     yield(val, cond_val)
+        """ ...................... fill in your code above ........................"""
 
 
 class RenameTask(RelAlgQueryTask):
-
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
-        assert (isinstance(raquery, radb.ast.Rename))
+        assert isinstance(raquery, radb.ast.Rename)
 
-        return [task_factory(raquery.inputs[0], step=self.step + 1, env=self.exec_environment)]
+        return [
+            task_factory(
+                raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+            )
+        ]
 
     def mapper(self, line):
-        relation, tuple = line.split('\t')
+        relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
         raquery = radb.parse.one_statement_from_string(self.querystring)
 
-        ''' ...................... fill in your code below ........................'''
+        """ ...................... fill in your code below ........................"""
 
         yield ("foo", "bar")
 
-        ''' ...................... fill in your code above ........................'''
+        """ ...................... fill in your code above ........................"""
 
 
 class ProjectTask(RelAlgQueryTask):
-
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
-        assert (isinstance(raquery, radb.ast.Project))
+        assert isinstance(raquery, radb.ast.Project)
 
-        return [task_factory(raquery.inputs[0], step=self.step + 1, env=self.exec_environment)]
+        return [
+            task_factory(
+                raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+            )
+        ]
 
     def mapper(self, line):
-        relation, tuple = line.split('\t')
+        relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
         attrs = radb.parse.one_statement_from_string(self.querystring).attrs
 
-        ''' ...................... fill in your code below ........................'''
+        """ ...................... fill in your code below ........................"""
 
         yield ("foo", "bar")
 
-        ''' ...................... fill in your code above ........................'''
+        """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
-        ''' ...................... fill in your code below ........................'''
+        """...................... fill in your code below ........................"""
 
         yield ("foo", "bar")
 
-        ''' ...................... fill in your code above ........................'''
+        """ ...................... fill in your code above ........................"""
 
 
-if __name__ == '__main__':
-    luigi.run()
+if __name__ == "__main__":
+    from test_ra2mr import prepareMockFileSystem
+    import luigi.mock as mock
+
+    # querystring = "\select_{gender='female'} Person;"
+    querystring = "\select_{price=9}(Serves);"
+    raquery = radb.parse.one_statement_from_string(querystring)
+
+    prepareMockFileSystem()
+    task = task_factory(raquery, env=ExecEnv.MOCK)
+    luigi.build([task], local_scheduler=True)
+
+    _input = []
+    with task.input()[0].open("r") as f:
+        for line in f:
+            _input.append(line)
+    print(_input)
+
+    _output = []
+    with task.output().open("r") as f:
+        for line in f:
+            _output.append(line)
+    print(_output)

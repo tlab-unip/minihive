@@ -31,5 +31,12 @@ cat testfile | ./mapper.py | sort | ./reducer.py
 ```
 
 
-### Milestones
+### Running Luigi Tasks
+
+```
+poetry run python -m luigi \
+    --module 3_mr-translation.ra2mr SelectTask \
+    --querystring "\select_{gender='female'} Person;" \
+    --exec-environment LOCAL --local-scheduler
+```
 
