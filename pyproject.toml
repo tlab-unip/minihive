@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "minihive"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+sqlparse = "^0.4.4"
+radb = "^3.0.5"
+luigi = "^3.4.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
