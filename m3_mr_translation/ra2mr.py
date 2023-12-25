@@ -7,6 +7,7 @@ from luigi.mock import MockTarget
 import radb
 import radb.ast as ast
 import radb.parse as parse
+from types import SimpleNamespace
 
 """
 Control where the input data comes from, and where output data should go.
@@ -155,22 +156,62 @@ class JoinTask(RelAlgQueryTask):
         relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
-        raquery = radb.parse.one_statement_from_string(self.querystring)
-        condition = raquery.cond
+        condition: ast.ValExprBinaryOp = radb.parse.one_statement_from_string(
+            self.querystring
+        ).cond
 
         """ ...................... fill in your code below ........................"""
+        conds: list[ast.ValExprBinaryOp] = []
+        queue = [condition]
+        while len(queue) > 0:
+            top = queue.pop(0)
+            if isinstance(top, ast.ValExprBinaryOp):
+                if top.op != parse.RAParser.AND:
+                    conds.append(top)
+                    continue
+            queue += top.inputs
 
-        yield ("foo", "bar")
+        # TODO Assume op is AND, cond is (attribute, value) pair
+        attrs: ast.AttrRef = []
+        for cond in conds:
+            attrs += [
+                input
+                for input in cond.inputs
+                if isinstance(input, ast.AttrRef) and input.rel == relation
+            ]
 
+        rel_vals = [
+            json_tuple.get(relation + "." + attr.name)
+            for attr in attrs
+            if json_tuple.get(relation + "." + attr.name) != None
+        ]
+        match cond.op:
+            case parse.RAParser.EQ:
+                yield (rel_vals, line)
         """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
         raquery = radb.parse.one_statement_from_string(self.querystring)
-
         """ ...................... fill in your code below ........................"""
 
-        yield ("foo", "bar")
+        rels: dict[str, list] = {}
+        for value in values:
+            relation, tuple = value.split("\t")
+            json_tuple = json.loads(tuple)
+            if rels.get(relation) == None:
+                rels[relation] = []
+            rels[relation].append(json_tuple)
 
+        if len(rels) == 2:
+            rel1, rel2 = rels
+            for tuple1 in rels[rel1]:
+                for tuple2 in rels[rel2]:
+                    new_tuple = dict(
+                        list(tuple1.items())
+                        + list(tuple2.items())
+                        # + [(attr, val)]
+                    )
+                    yield (key, json.dumps(new_tuple))
         """ ...................... fill in your code above ........................"""
 
 
@@ -194,22 +235,34 @@ class SelectTask(RelAlgQueryTask):
         ).cond
 
         """ ...................... fill in your code below ........................"""
-        left, right = condition.inputs
-        cond_attr = left if isinstance(left, ast.AttrRef) else right
-        cond_val = (
-            left
-            if isinstance(left, ast.RANumber) or isinstance(left, ast.RAString)
-            else right
-        ).val.strip("'")
+        conds: list[ast.ValExprBinaryOp] = []
+        queue = [condition]
+        while len(queue) > 0:
+            top = queue.pop(0)
+            if isinstance(top, ast.ValExprBinaryOp):
+                if top.op != parse.RAParser.AND:
+                    conds.append(top)
+                    continue
+            queue += top.inputs
 
-        if cond_attr.rel is not None and cond_attr.rel != relation:
-            return
+        # TODO Assume op is AND, cond is (attribute, value) pair
+        for cond in conds:
+            attr: ast.AttrRef = [
+                input for input in cond.inputs if isinstance(input, ast.AttrRef)
+            ][0]
+            val: str = [
+                input
+                for input in cond.inputs
+                if isinstance(input, ast.RANumber) or isinstance(input, ast.RAString)
+            ][0].val.strip("'")
 
-        val = json_tuple.get(relation + "." + cond_attr.name)
-        if str(val) == cond_val:
-            yield (relation, tuple)
-        # else:
-        #     yield(val, cond_val)
+            rel_val = json_tuple.get(relation + "." + attr.name)
+            match cond.op:
+                case parse.RAParser.EQ:
+                    if val != str(rel_val):
+                        # yield (relation, val + "," + str(rel_val))
+                        return
+        yield (relation, tuple)
         """ ...................... fill in your code above ........................"""
 
 
@@ -228,12 +281,18 @@ class RenameTask(RelAlgQueryTask):
         relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
-        raquery = radb.parse.one_statement_from_string(self.querystring)
+        raquery: ast.Rename = radb.parse.one_statement_from_string(self.querystring)
 
         """ ...................... fill in your code below ........................"""
-
-        yield ("foo", "bar")
-
+        # TODO ignore attributes
+        new_rel = raquery.relname
+        new_tuple = dict(
+            [
+                (new_rel + "." + item[0].split(".")[1], item[1])
+                for item in json_tuple.items()
+            ]
+        )
+        yield (new_rel, json.dumps(new_tuple))
         """ ...................... fill in your code above ........................"""
 
 
@@ -252,19 +311,24 @@ class ProjectTask(RelAlgQueryTask):
         relation, tuple = line.split("\t")
         json_tuple = json.loads(tuple)
 
-        attrs = radb.parse.one_statement_from_string(self.querystring).attrs
-
+        attrs: list[ast.AttrRef] = radb.parse.one_statement_from_string(
+            self.querystring
+        ).attrs
         """ ...................... fill in your code below ........................"""
-
-        yield ("foo", "bar")
-
+        new_tuple = dict(
+            [
+                (attr.rel + "." + attr.rel, json_tuple.get(attr.rel + "." + attr.name))
+                for attr in attrs
+                if json_tuple.get(attr.rel + "." + attr.name) != None
+            ]
+        )
+        yield (relation, json.dumps(new_tuple))
         """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
         """...................... fill in your code below ........................"""
-
-        yield ("foo", "bar")
-
+        for value in values:
+            yield (key, value)
         """ ...................... fill in your code above ........................"""
 
 
@@ -272,22 +336,33 @@ if __name__ == "__main__":
     from test_ra2mr import prepareMockFileSystem
     import luigi.mock as mock
 
-    # querystring = "\select_{gender='female'} Person;"
-    querystring = "\select_{price=9}(Serves);"
-    raquery = radb.parse.one_statement_from_string(querystring)
-
     prepareMockFileSystem()
+    # querystring = "\select_{gender='female' and age=16}(Person);"
+    # querystring = "\select_{P.gender='female'} \\rename_{P:*} (Person);"
+    # querystring = (
+    #     "Person \join_{Person.name = Eats.name} (\select_{pizza='mushroom'} Eats);"
+    # )
+    # querystring = "\project_{pizza} \select_{pizza='mushroom'} Eats;"
+    # querystring = "(\\rename_{P:*} Person) \join_{P.gender = Q.gender and P.age = Q.age} (\\rename_{Q:*} Person);"
+    querystring = (
+        "(Person \join_{Person.name = Eats.name} Eats) "  # "\join_{Eats.pizza = Serves.pizza} (\select_{pizzeria='Dominos'} Serves)
+        ";"
+    )
+    raquery = radb.parse.one_statement_from_string(querystring)
     task = task_factory(raquery, env=ExecEnv.MOCK)
     luigi.build([task], local_scheduler=True)
 
-    _input = []
-    with task.input()[0].open("r") as f:
-        for line in f:
-            _input.append(line)
-    print(_input)
+    data_list = mock.MockFileSystem().listdir("")
+    print(data_list)
+
+    f = lambda _task: [
+        f(_dep) or print(_dep) for _dep in _task.deps() if isinstance(_dep, luigi.Task)
+    ]
+    f(task)
 
     _output = []
     with task.output().open("r") as f:
         for line in f:
             _output.append(line)
     print(_output)
+    print(len(_output))
