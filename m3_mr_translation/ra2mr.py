@@ -154,13 +154,14 @@ class JoinTask(RelAlgQueryTask):
 
     def mapper(self, line):
         relation, tuple = line.split("\t")
-        json_tuple = json.loads(tuple)
+        json_tuple: dict = json.loads(tuple)
 
         condition: ast.ValExprBinaryOp = radb.parse.one_statement_from_string(
             self.querystring
         ).cond
 
         """ ...................... fill in your code below ........................"""
+
         conds: list[ast.ValExprBinaryOp] = []
         queue = [condition]
         while len(queue) > 0:
@@ -172,46 +173,54 @@ class JoinTask(RelAlgQueryTask):
             queue += top.inputs
 
         # TODO Assume op is AND, cond is (attribute, value) pair
-        attrs: ast.AttrRef = []
+        attrs: str = []
         for cond in conds:
-            attrs += [
-                input
-                for input in cond.inputs
-                if isinstance(input, ast.AttrRef) and input.rel == relation
-            ]
+            # Filter attributes that exists in tuple
+            for input in cond.inputs:
+                assert isinstance(input, ast.AttrRef)
+                if input.rel != None and str(input) in json_tuple.keys():
+                    attrs.append(str(input))
+                elif input.rel == None:
+                    attrs += [
+                        key
+                        for key in json_tuple.keys()
+                        if key.split(".")[1] == input.name
+                    ]
 
         rel_vals = [
-            json_tuple.get(relation + "." + attr.name)
-            for attr in attrs
-            if json_tuple.get(relation + "." + attr.name) != None
+            json_tuple.get(attr) for attr in attrs if json_tuple.get(attr) != None
         ]
         match cond.op:
             case parse.RAParser.EQ:
-                yield (rel_vals, line)
+                yield (rel_vals, tuple)
+        return
         """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
         raquery = radb.parse.one_statement_from_string(self.querystring)
         """ ...................... fill in your code below ........................"""
+        # for value in values:
+        #     yield (key, value)
+        # return
 
-        rels: dict[str, list] = {}
+        rels: list[list] = [[], []]
+        prev_keys: set[str] = {}
+        index = 1
         for value in values:
-            relation, tuple = value.split("\t")
-            json_tuple = json.loads(tuple)
-            if rels.get(relation) == None:
-                rels[relation] = []
-            rels[relation].append(json_tuple)
+            json_tuple = json.loads(value)
+            cur_keys = set(json_tuple.keys())
+            if len(cur_keys.difference(prev_keys)) != 0:
+                prev_keys = cur_keys
+                index = (index + 1) % 2
+                rels[index].append(json_tuple)
+            else:
+                rels[index].append(json_tuple)
 
-        if len(rels) == 2:
-            rel1, rel2 = rels
-            for tuple1 in rels[rel1]:
-                for tuple2 in rels[rel2]:
-                    new_tuple = dict(
-                        list(tuple1.items())
-                        + list(tuple2.items())
-                        # + [(attr, val)]
-                    )
-                    yield (key, json.dumps(new_tuple))
+        assert len(rels) == 2
+        for tuple1 in rels[0]:
+            for tuple2 in rels[1]:
+                new_tuple = dict(list(tuple1.items()) + list(tuple2.items()))
+                yield (key, json.dumps(new_tuple))
         """ ...................... fill in your code above ........................"""
 
 
@@ -256,7 +265,15 @@ class SelectTask(RelAlgQueryTask):
                 if isinstance(input, ast.RANumber) or isinstance(input, ast.RAString)
             ][0].val.strip("'")
 
-            rel_val = json_tuple.get(relation + "." + attr.name)
+            rel_attr = (
+                str(attr)
+                if attr.rel != None
+                else [
+                    key for key in json_tuple.keys() if key.split(".")[1] == attr.name
+                ][0]
+            )
+
+            rel_val = json_tuple.get(rel_attr)
             match cond.op:
                 case parse.RAParser.EQ:
                     if val != str(rel_val):
@@ -315,19 +332,22 @@ class ProjectTask(RelAlgQueryTask):
             self.querystring
         ).attrs
         """ ...................... fill in your code below ........................"""
-        new_tuple = dict(
-            [
-                (attr.rel + "." + attr.rel, json_tuple.get(attr.rel + "." + attr.name))
-                for attr in attrs
-                if json_tuple.get(attr.rel + "." + attr.name) != None
-            ]
-        )
-        yield (relation, json.dumps(new_tuple))
+        tuple_list = []
+        for attr in attrs:
+            if attr.rel != None:
+                rel_attr = str(attr)
+            else:
+                rel_attr = [
+                    key for key in json_tuple.keys() if key.split(".")[1] == attr.name
+                ][0]
+            tuple_list.append((rel_attr, json_tuple.get(rel_attr)))
+        result = json.dumps(dict(tuple_list))
+        yield (relation, result)
         """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
         """...................... fill in your code below ........................"""
-        for value in values:
+        for value in list(set(values)):
             yield (key, value)
         """ ...................... fill in your code above ........................"""
 
@@ -343,11 +363,19 @@ if __name__ == "__main__":
     #     "Person \join_{Person.name = Eats.name} (\select_{pizza='mushroom'} Eats);"
     # )
     # querystring = "\project_{pizza} \select_{pizza='mushroom'} Eats;"
-    # querystring = "(\\rename_{P:*} Person) \join_{P.gender = Q.gender and P.age = Q.age} (\\rename_{Q:*} Person);"
+    # querystring = (
+    #     "(\\rename_{P:*} Person)"
+    #     " \join_{P.gender = Q.gender and P.age = Q.age}"
+    #     " (\\rename_{Q:*} Person)"
+    #     ";"
+    # )
     querystring = (
-        "(Person \join_{Person.name = Eats.name} Eats) "  # "\join_{Eats.pizza = Serves.pizza} (\select_{pizzeria='Dominos'} Serves)
+        "(Person \join_{Person.name = Eats.name} Eats) "
+        "\join_{Eats.pizza = Serves.pizza}"
+        "(\select_{pizzeria='Dominos'} Serves)"
         ";"
     )
+
     raquery = radb.parse.one_statement_from_string(querystring)
     task = task_factory(raquery, env=ExecEnv.MOCK)
     luigi.build([task], local_scheduler=True)

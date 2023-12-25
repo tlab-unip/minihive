@@ -21,7 +21,8 @@ docker exec minihive python /home/minihive/minihive/milestone-sample/test_exampl
 
 Run the job
 ```
-mapred streaming -mapper mapper.py -reducer reducer.py -file <relative-path-to-mapper.py> -file <relative-path-to-reducer.py> -input <hdfs-path-to-source> -output <hdfs-path-to-output>
+mapred streaming -mapper mapper.py -reducer reducer.py -file <relative-path-to-mapper.py> \
+    -file <relative-path-to-reducer.py> -input <hdfs-path-to-source> -output <hdfs-path-to-output>
 ```
 
 Test the script
@@ -34,9 +35,14 @@ cat testfile | ./mapper.py | sort | ./reducer.py
 ### Running Luigi Tasks
 
 ```
-poetry run python -m luigi \
-    --module 3_mr-translation.ra2mr SelectTask \
+python3 -m luigi \
+    --module m3_mr_translation.ra2mr SelectTask \
     --querystring "\select_{gender='female'} Person;" \
     --exec-environment LOCAL --local-scheduler
+```
+
+```
+python3 -m pytest m3_mr_translation/test_ra2mr.py \
+    -p no:warnings --show-capture=no
 ```
 
