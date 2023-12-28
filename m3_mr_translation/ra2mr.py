@@ -7,7 +7,6 @@ from luigi.mock import MockTarget
 import radb
 import radb.ast as ast
 import radb.parse as parse
-from types import SimpleNamespace
 
 """
 Control where the input data comes from, and where output data should go.
@@ -172,7 +171,7 @@ class JoinTask(RelAlgQueryTask):
                     continue
             queue += top.inputs
 
-        # TODO Assume op is AND, cond is (attribute, value) pair
+        # TODO Assume op is AND, `cond` is (attribute, value) pair
         attrs: str = []
         for cond in conds:
             # Filter attributes that exists in tuple
@@ -342,7 +341,7 @@ class ProjectTask(RelAlgQueryTask):
                 ][0]
             tuple_list.append((rel_attr, json_tuple.get(rel_attr)))
         result = json.dumps(dict(tuple_list))
-        yield (relation, result)
+        yield (0, result)
         """ ...................... fill in your code above ........................"""
 
     def reducer(self, key, values):
@@ -369,11 +368,15 @@ if __name__ == "__main__":
     #     " (\\rename_{Q:*} Person)"
     #     ";"
     # )
+    # querystring = (
+    #     "(Person \join_{Person.name = Eats.name} Eats) "
+    #     "\join_{Eats.pizza = Serves.pizza}"
+    #     "(\select_{pizzeria='Dominos'} Serves)"
+    #     ";"
+    # )
     querystring = (
-        "(Person \join_{Person.name = Eats.name} Eats) "
-        "\join_{Eats.pizza = Serves.pizza}"
-        "(\select_{pizzeria='Dominos'} Serves)"
-        ";"
+        "\project_{A.name, B.name} "
+        "((\\rename_{A: *} Eats) \join_{A.pizza = B.pizza} (\\rename_{B: *} Eats));"
     )
 
     raquery = radb.parse.one_statement_from_string(querystring)
@@ -392,5 +395,5 @@ if __name__ == "__main__":
     with task.output().open("r") as f:
         for line in f:
             _output.append(line)
-    print(_output)
+    print("".join("{}: {}".format(*k) for k in enumerate(_output)))
     print(len(_output))

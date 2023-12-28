@@ -6,7 +6,7 @@ import radb.parse
 import radb.ast as ast
 
 
-def translate(stmt: sql.Statement) -> ast.Project:
+def translate(stmt: sql.Statement) -> ast.RelExpr:
     # Seperate clauses by keyword
     tkn_list: list[sql.Token] = [x for x in stmt.flatten() if not x.is_whitespace]
     clauses: dict[str, list[sql.Token]] = {"select": [], "from": [], "where": []}
@@ -15,12 +15,13 @@ def translate(stmt: sql.Statement) -> ast.Project:
         if tkn.ttype in tokens.DML:
             cur_clause = clauses["select"]
         elif tkn.ttype in tokens.Keyword:
-            if tkn.value.upper() == "FROM":
-                cur_clause = clauses["from"]
-            elif tkn.value.upper() == "WHERE":
-                cur_clause = clauses["where"]
-            else:
-                cur_clause.append(tkn)
+            match tkn.value.upper():
+                case "FROM":
+                    cur_clause = clauses["from"]
+                case "WHERE":
+                    cur_clause = clauses["where"]
+                case _:
+                    cur_clause.append(tkn)
         else:
             cur_clause.append(tkn)
 
@@ -76,13 +77,17 @@ def from_parser(clause: list[tokens.Token]) -> ast.RelExpr:
 def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
     """
     Parse `Where` Clause
-    attributes -> condition -> condition2 -> clause
     """
+    # Pasing `a` or `R.a`
     temp_tkns: list[tokens.Token] = []
+    # Parsing `a = b`
     temp_attrs: list[ast.AttrRef | ast.RAString | ast.RANumber | int] = []
+    # Parsing `(a = b) and (c = d)`
     temp_attrs_2: list[ast.ValExprBinaryOp | int] = []
     for tkn in clause:
+        # Assembling tokens into attribute if there's any
         if tkn.ttype in tokens.Keyword or tkn.ttype in tokens.Operator:
+            # Parsing `a` or `R.a` from `temp_tkns`
             match len(temp_tkns):
                 case 1:
                     temp_attrs.append(ast.AttrRef(rel=None, name=temp_tkns[0].value))
@@ -92,7 +97,9 @@ def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
                     )
             temp_tkns.clear()
 
+        # Collecting token inside `a = b`
         if not tkn.ttype in tokens.Keyword:
+            # Collecting token as operand or into `temp_tkns`
             if not tkn.ttype in tokens.Operator:
                 if tkn.ttype in tokens.String:
                     temp_attrs.append(ast.RAString(tkn.value))
@@ -115,23 +122,23 @@ def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
                         op = ast.sym.LE
                     case ">=":
                         op = ast.sym.GE
+                assert op != None
                 temp_attrs.append(op)
-
+        # Assembling attributes from `temp_attrs` into a `BinaryOp`
         else:
             op = None
             match tkn.value.upper():
                 case "AND":
                     op = ast.sym.AND
 
-            if len(temp_attrs) == 3:
-                temp_attrs_2.append(
-                    ast.ValExprBinaryOp(temp_attrs[0], temp_attrs[1], temp_attrs[2])
-                )
-                temp_attrs_2.append(op)
-                temp_attrs.clear()
-            else:
-                print("Condition Failed", temp_attrs)
+            assert len(temp_attrs) == 3 and op != None
+            temp_attrs_2.append(
+                ast.ValExprBinaryOp(temp_attrs[0], temp_attrs[1], temp_attrs[2])
+            )
+            temp_attrs_2.append(op)
+            temp_attrs.clear()
 
+    # When end of clause
     match len(temp_tkns):
         case 1:
             temp_attrs.append(ast.AttrRef(rel=None, name=temp_tkns[0].value))
@@ -140,6 +147,7 @@ def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
                 ast.AttrRef(rel=temp_tkns[0].value, name=temp_tkns[2].value)
             )
     temp_tkns.clear()
+
     if len(temp_attrs) == 3:
         temp_attrs_2.append(
             ast.ValExprBinaryOp(temp_attrs[0], temp_attrs[1], temp_attrs[2])
@@ -149,7 +157,7 @@ def where_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr:
     if len(temp_attrs_2) != 0:
         cond = temp_attrs_2[0]
         if len(temp_attrs_2) >= 3:
-            for i in range(0, len(temp_attrs_2), 3):
+            for i in range(0, len(temp_attrs_2) - 2, 2):
                 cond = ast.ValExprBinaryOp(
                     cond, temp_attrs_2[i + 1], temp_attrs_2[i + 2]
                 )
@@ -196,11 +204,33 @@ def select_parser(clause: list[tokens.Token], input: ast.RelExpr) -> ast.RelExpr
 
 if __name__ == "__main__":
     statements = [
-        "select distinct name from person where gender='female'",
-        "select distinct T1.a, T2.b from Test1 T1, Test2 T2 where T1.foo = T2.bar and 'foo' = T2.bar",
-        "select distinct * from Person, Eats where Person.name = Eats.name",
+        (
+            "select distinct Person.name, Serves.pizzeria from Person, Eats, Serves "
+            "where Person.name = Eats.name and Eats.pizza = Serves.pizza "
+            "and Eats.pizza = 'mushroom'"
+        ),
+        (
+            "select distinct P.name, S.pizzeria from Person P, Eats E, Serves S "
+            "where P.name = E.name and E.pizza = S.pizza "
+            "and E.pizza = 'mushroom'"
+        ),
+        (
+            "select distinct P1.name "
+            "from Person P1, Eats Eats1, Person P2, Eats Eats2 where P1.name = Eats1.name and P2.name = Eats2.name "
+            "and P1.name = P2.name and P1.age = 16 "
+        ),
+        (
+            "select distinct Serves.pizzeria from Person, Eats, Serves "
+            "where Person.name = Eats.name and Eats.pizza = Serves.pizza "
+            "and Eats.pizza = 'mushroom' and Serves.price = 11"
+        ),
+        (
+            "select distinct * from Person, Eats, Serves "
+            "where Person.name = Eats.name and Eats.pizza = Serves.pizza "
+            "and Person.age = 16 and Serves.pizzeria = 'Little Ceasars'"
+        ),
+        ("select distinct A.name, B.name from Eats A, Eats B where A.pizza = B.pizza"),
     ]
-
     for stmt in statements:
         ra = translate(sqlparse.parse(stmt)[0])
         print(ra)

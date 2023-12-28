@@ -247,6 +247,7 @@ if __name__ == "__main__":
     dd["Frequents"] = {"name": "string", "pizzeria": "string"}
 
     stmt = "\project_{P1.name, P2.name} \select_{P1.age = 16 and P2.age = 16 and P1.name = P2.name} ((\\rename_{P1: *} Person) \cross (\\rename_{P2: *} Person));"
+    # stmt = "\project_{A.name, B.name} (\select_{A.pizza = B.pizza} ((\\rename_{A: *} Eats) \cross (\\rename_{B: *} Eats)));"
     ra = parse.one_statement_from_string(stmt)
     ra = rule_break_up_selections(ra)
     ra = rule_push_down_selections(ra, dd)
