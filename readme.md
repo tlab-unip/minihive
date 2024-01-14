@@ -46,3 +46,10 @@ python3 -m pytest m3_mr_translation/test_ra2mr.py \
     -p no:warnings --show-capture=no
 ```
 
+Run optimizing task
+
+```
+python3 m4_mr_opt/miniHive.py \
+    --O --SF 1 --env LOCAL \
+    "select distinct N_NAME from NATION"
+```
