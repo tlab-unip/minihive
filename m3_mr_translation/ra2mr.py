@@ -71,6 +71,7 @@ def count_steps(raquery):
 
 
 class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
+
     """
     Each physical operator knows its (partial) query string.
     As a string, the value of this parameter can be searialized
@@ -98,6 +99,12 @@ class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
             filename = "tmp" + str(self.step) + ".tmp"
         return self.get_output(filename)
 
+    def inner_mapper(self, key, value) -> tuple | None:
+        return (key, value)
+
+    def inner_reducer(self, key, values) -> tuple[str, list]:
+        return key, values
+
 
 """
 Given the radb-string representation of a relational algebra query,
@@ -108,34 +115,203 @@ this produces a tree of luigi tasks with the physical query operators.
 def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False):
     assert isinstance(raquery, radb.ast.Node)
 
-    if isinstance(raquery, radb.ast.Select):
-        return SelectTask(
-            querystring=str(raquery) + ";", step=step, exec_environment=env
+    if optimize:
+        last = task_factory(raquery, step, env)
+        tasks: list[RelAlgQueryTask] = [last]
+        match last:
+            case SelectTask() | RenameTask():
+                cur_first = task_factory(raquery.inputs[0], step, env)
+                while True:
+                    match cur_first:
+                        # Fold map only jobs
+                        case SelectTask() | RenameTask():
+                            tasks.insert(0, cur_first)
+                        # Fold map+reduce job at the beginning
+                        case JoinTask() | ProjectTask():
+                            # TODO Fold a folded task
+                            tasks.insert(0, cur_first)
+                            break
+                        case _:
+                            break
+                    ra = parse.one_statement_from_string(cur_first.querystring)
+                    cur_first = task_factory(ra.inputs[0], step, env)
+                if len(tasks) > 1:
+                    return FoldedTask(
+                        tasks=tasks,
+                        step=step,
+                        querystring=str(raquery) + ";",
+                        exec_environment=env,
+                    )
+            case ProjectTask():
+                cur_first = task_factory(raquery.inputs[0], step, env)
+                while True:
+                    match cur_first:
+                        # Fold map only jobs
+                        case SelectTask() | RenameTask():
+                            tasks.insert(0, cur_first)
+                        case _:
+                            break
+                    ra = parse.one_statement_from_string(cur_first.querystring)
+                    cur_first = task_factory(ra.inputs[0], step, env)
+                if len(tasks) > 1:
+                    return FoldedTask(
+                        tasks=tasks,
+                        step=step,
+                        querystring=str(raquery) + ";",
+                        exec_environment=env,
+                    )
+            case JoinTask():
+                tasks_left = []
+                cur_left = task_factory(raquery.inputs[0], step, env)
+                while isinstance(cur_left, SelectTask) or isinstance(
+                    cur_left, RenameTask
+                ):
+                    tasks_left.insert(0, cur_left)
+                    ra = parse.one_statement_from_string(cur_left.querystring)
+                    cur_right = task_factory(ra.inputs[0], step, env)
+
+                tasks_right = []
+                cur_right = task_factory(raquery.inputs[1], step, env)
+                while isinstance(cur_right, SelectTask) or isinstance(
+                    cur_right, RenameTask
+                ):
+                    tasks_right.insert(0, cur_left)
+                    ra = parse.one_statement_from_string(cur_right.querystring)
+                    cur_right = task_factory(ra.inputs[0], step, env)
+
+                # TODO nest folded task
+                if len(tasks_left) > 0 and len(tasks_right) > 0:
+                    return FoldedTask(
+                        tasks_left=tasks_left,
+                        tasks_right=tasks_right,
+                        tasks=tasks,
+                        step=step,
+                        querystring=str(raquery) + ";",
+                        exec_environment=env,
+                    )
+
+    match raquery:
+        case ast.Select():
+            return SelectTask(
+                querystring=str(raquery) + ";",
+                step=step,
+                exec_environment=env,
+            )
+        case ast.RelRef():
+            filename = raquery.rel + ".json"
+            return InputData(filename=filename, exec_environment=env)
+        case ast.Join():
+            return JoinTask(
+                querystring=str(raquery) + ";",
+                step=step,
+                exec_environment=env,
+            )
+        case ast.Project():
+            return ProjectTask(
+                querystring=str(raquery) + ";",
+                step=step,
+                exec_environment=env,
+            )
+        case ast.Rename():
+            return RenameTask(
+                querystring=str(raquery) + ";",
+                step=step,
+                exec_environment=env,
+            )
+        case _:
+            raise Exception(
+                "Operator " + str(type(raquery)) + " not implemented (yet)."
+            )
+
+
+class FoldedTask(RelAlgQueryTask):
+    tasks: list[RelAlgQueryTask] = luigi.Parameter(default=[])
+    # For handing join task
+    tasks_left: list[RelAlgQueryTask] = luigi.Parameter(default=[])
+    tasks_right: list[RelAlgQueryTask] = luigi.Parameter(default=[])
+    # For handling different branch
+    rels_left: set[str] = luigi.Parameter(default={})
+    rels_right: set[str] = luigi.Parameter(default={})
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        reducer_task = [task for task in self.tasks if task.reducer != NotImplemented]
+        if len(reducer_task) != 0:
+            self.reducer = self._reducer
+
+    def requires(self):
+        deps_left: list[RelAlgQueryTask] = (
+            [] if len(self.tasks_left) == 0 else self.tasks_left[0].requires()
         )
-
-    elif isinstance(raquery, radb.ast.RelRef):
-        filename = raquery.rel + ".json"
-        return InputData(filename=filename, exec_environment=env)
-
-    elif isinstance(raquery, radb.ast.Join):
-        return JoinTask(querystring=str(raquery) + ";", step=step, exec_environment=env)
-
-    elif isinstance(raquery, radb.ast.Project):
-        return ProjectTask(
-            querystring=str(raquery) + ";", step=step, exec_environment=env
+        deps_right: list[RelAlgQueryTask] = (
+            [] if len(self.tasks_right) == 0 else self.tasks_right[0].requires()
         )
-
-    elif isinstance(raquery, radb.ast.Rename):
-        return RenameTask(
-            querystring=str(raquery) + ";", step=step, exec_environment=env
+        self.rels_left |= set(
+            str(dep.filename) for dep in deps_left if isinstance(dep, InputData)
         )
+        self.rels_right |= set(
+            str(dep.filename) for dep in deps_right if isinstance(dep, InputData)
+        )
+        deps: list[RelAlgQueryTask] = deps_left + deps_right
+        deps += [] if len(deps) != 0 else self.tasks[0].requires()
+        return deps
 
-    else:
-        # We will not evaluate the Cross product on Hadoop, too expensive.
-        raise Exception("Operator " + str(type(raquery)) + " not implemented (yet).")
+    def inner_reducer(self, key, values) -> tuple[str, list]:
+        # Only the first reducer encountered will be executed
+        # Then the mapper of following tasks will be executed
+        flag = False
+        for task in self.tasks:
+            if flag:
+                new_values = []
+                for value in values:
+                    res = task.inner_mapper(key, value)
+                    if res != None:
+                        _, value = res
+                        new_values.append(value)
+                values = new_values
+            if not flag and task.reducer != NotImplemented:
+                flag = True
+                key, values = task.inner_reducer(key, values)
+        return key, values
+
+    def _reducer(self, key, values):
+        key, values = self.inner_reducer(key, values)
+        for value in values:
+            yield key, value
+
+    def mapper(self, line):
+        key, value = line.split("\t")
+        if len(self.tasks_left) != 0 and len(self.tasks_right) != 0:
+            ra_left: ast.RelExpr = parse.one_statement_from_string(
+                self.tasks_left[0].querystring
+            )
+            # TODO Make sure deepest left is relation name
+            assert len(ra_left.inputs) == 1
+            assert isinstance(ra_left.inputs[0], ast.RelRef)
+            self.rels_left.append(ra_left.inputs[0].rel)
+            if key in self.rels_left:
+                for task in self.tasks_left:
+                    key, value = task.inner_mapper(key, value)
+            else:
+                for task in self.tasks_right:
+                    key, value = task.inner_mapper(key, value)
+
+            # yield key, value
+            # return
+
+        for task in self.tasks:
+            res = task.inner_mapper(key, value)
+            if res == None:
+                return
+            key, value = res
+        yield (key, value)
 
 
 class JoinTask(RelAlgQueryTask):
+    """
+    Mapper + Reducer
+    """
+
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
         assert isinstance(raquery, radb.ast.Join)
@@ -151,9 +327,8 @@ class JoinTask(RelAlgQueryTask):
 
         return [task1, task2]
 
-    def mapper(self, line):
-        relation, tuple = line.split("\t")
-        json_tuple: dict = json.loads(tuple)
+    def inner_mapper(self, key, value):
+        json_tuple: dict = json.loads(value)
 
         condition: ast.ValExprBinaryOp = radb.parse.one_statement_from_string(
             self.querystring
@@ -171,7 +346,7 @@ class JoinTask(RelAlgQueryTask):
                     continue
             queue += top.inputs
 
-        # TODO Assume op is AND, `cond` is (attribute, value) pair
+        # Assume `cond` is (attribute, value) pair
         attrs: str = []
         for cond in conds:
             # Filter attributes that exists in tuple
@@ -189,17 +364,17 @@ class JoinTask(RelAlgQueryTask):
         rel_vals = [
             json_tuple.get(attr) for attr in attrs if json_tuple.get(attr) != None
         ]
+        # Assume op is AND
         match cond.op:
             case parse.RAParser.EQ:
-                yield (rel_vals, tuple)
-        return
+                return (rel_vals, value)
         """ ...................... fill in your code above ........................"""
 
-    def reducer(self, key, values):
-        raquery = radb.parse.one_statement_from_string(self.querystring)
-        """ ...................... fill in your code below ........................"""
+    def inner_reducer(self, key, values):
+        # raquery = radb.parse.one_statement_from_string(self.querystring)
+        """...................... fill in your code below ........................"""
         # for value in values:
-        #     yield (key, value)
+        #     return (key, value)
         # return
 
         rels: list[list] = [[], []]
@@ -216,14 +391,36 @@ class JoinTask(RelAlgQueryTask):
                 rels[index].append(json_tuple)
 
         assert len(rels) == 2
-        for tuple1 in rels[0]:
-            for tuple2 in rels[1]:
-                new_tuple = dict(list(tuple1.items()) + list(tuple2.items()))
-                yield (key, json.dumps(new_tuple))
+
+        # for tuple1 in rels[0]:
+        #     for tuple2 in rels[1]:
+        #         new_tuple = dict(list(tuple1.items()) + list(tuple2.items()))
+        #         return (key, json.dumps(new_tuple))
+        values = [
+            json.dumps(dict(list(tuple1.items()) + list(tuple2.items())))
+            for tuple1 in rels[0]
+            for tuple2 in rels[1]
+        ]
+        return key, values
         """ ...................... fill in your code above ........................"""
+
+    def mapper(self, line):
+        key, value = line.split("\t")
+        result = self.inner_mapper(key, value)
+        if result != None:
+            yield result
+
+    def reducer(self, key, values):
+        key, values = self.inner_reducer(key, values)
+        for value in values:
+            yield key, value
 
 
 class SelectTask(RelAlgQueryTask):
+    """
+    Mapper Only
+    """
+
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
         assert isinstance(raquery, radb.ast.Select)
@@ -234,9 +431,8 @@ class SelectTask(RelAlgQueryTask):
             )
         ]
 
-    def mapper(self, line: str):
-        relation, tuple = line.split("\t")
-        json_tuple: dict = json.loads(tuple)
+    def inner_mapper(self, key, value):
+        json_tuple: dict = json.loads(value)
 
         condition: ast.ValExprBinaryOp = radb.parse.one_statement_from_string(
             self.querystring
@@ -278,11 +474,21 @@ class SelectTask(RelAlgQueryTask):
                     if val != str(rel_val):
                         # yield (relation, val + "," + str(rel_val))
                         return
-        yield (relation, tuple)
+        return (key, value)
         """ ...................... fill in your code above ........................"""
+
+    def mapper(self, line: str):
+        relation, tuple = line.split("\t")
+        res = self.inner_mapper(relation, tuple)
+        if res != None:
+            yield res
 
 
 class RenameTask(RelAlgQueryTask):
+    """
+    Mapper Only
+    """
+
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
         assert isinstance(raquery, radb.ast.Rename)
@@ -293,9 +499,8 @@ class RenameTask(RelAlgQueryTask):
             )
         ]
 
-    def mapper(self, line):
-        relation, tuple = line.split("\t")
-        json_tuple = json.loads(tuple)
+    def inner_mapper(self, key, value) -> tuple | None:
+        json_tuple = json.loads(value)
 
         raquery: ast.Rename = radb.parse.one_statement_from_string(self.querystring)
 
@@ -308,11 +513,19 @@ class RenameTask(RelAlgQueryTask):
                 for item in json_tuple.items()
             ]
         )
-        yield (new_rel, json.dumps(new_tuple))
+        return (new_rel, json.dumps(new_tuple))
         """ ...................... fill in your code above ........................"""
+
+    def mapper(self, line):
+        relation, tuple = line.split("\t")
+        yield self.inner_mapper(relation, tuple)
 
 
 class ProjectTask(RelAlgQueryTask):
+    """
+    Mapper + Reducer
+    """
+
     def requires(self):
         raquery = radb.parse.one_statement_from_string(self.querystring)
         assert isinstance(raquery, radb.ast.Project)
@@ -323,9 +536,8 @@ class ProjectTask(RelAlgQueryTask):
             )
         ]
 
-    def mapper(self, line):
-        relation, tuple = line.split("\t")
-        json_tuple = json.loads(tuple)
+    def inner_mapper(self, key, value) -> tuple | None:
+        json_tuple = json.loads(value)
 
         attrs: list[ast.AttrRef] = radb.parse.one_statement_from_string(
             self.querystring
@@ -341,39 +553,30 @@ class ProjectTask(RelAlgQueryTask):
                 ][0]
             tuple_list.append((rel_attr, json_tuple.get(rel_attr)))
         result = json.dumps(dict(tuple_list))
-        yield (0, result)
+        return (0, result)
         """ ...................... fill in your code above ........................"""
 
-    def reducer(self, key, values):
+    def inner_reducer(self, key, values):
         """...................... fill in your code below ........................"""
-        for value in list(set(values)):
-            yield (key, value)
+        return key, list(set(values))
         """ ...................... fill in your code above ........................"""
+
+    def mapper(self, line):
+        relation, tuple = line.split("\t")
+        yield self.inner_mapper(relation, tuple)
+
+    def reducer(self, key, values):
+        key, values = self.inner_reducer(key, values)
+        for value in values:
+            yield key, value
 
 
 if __name__ == "__main__":
-    from test_ra2mr import prepareMockFileSystem
     import luigi.mock as mock
+    from test_ra2mr import prepareMockFileSystem
 
     prepareMockFileSystem()
-    # querystring = "\select_{gender='female' and age=16}(Person);"
-    # querystring = "\select_{P.gender='female'} \\rename_{P:*} (Person);"
-    # querystring = (
-    #     "Person \join_{Person.name = Eats.name} (\select_{pizza='mushroom'} Eats);"
-    # )
-    # querystring = "\project_{pizza} \select_{pizza='mushroom'} Eats;"
-    # querystring = (
-    #     "(\\rename_{P:*} Person)"
-    #     " \join_{P.gender = Q.gender and P.age = Q.age}"
-    #     " (\\rename_{Q:*} Person)"
-    #     ";"
-    # )
-    # querystring = (
-    #     "(Person \join_{Person.name = Eats.name} Eats) "
-    #     "\join_{Eats.pizza = Serves.pizza}"
-    #     "(\select_{pizzeria='Dominos'} Serves)"
-    #     ";"
-    # )
+
     querystring = (
         "\project_{A.name, B.name} "
         "((\\rename_{A: *} Eats) \join_{A.pizza = B.pizza} (\\rename_{B: *} Eats));"

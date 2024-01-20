@@ -42,27 +42,11 @@ def eval(
     """ ...................... you may edit code above ........................"""
 
     luigi.build([task], local_scheduler=True)
+    print(ra4)
     return task
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Calling miniHive.")
-    parser.add_argument("--O", action="store_true", help="toggle optimization on")
-    parser.add_argument("--SF", type=float, default=0, help="the TPC-H scale factor")
-    parser.add_argument(
-        "--env", choices=["HDFS", "LOCAL"], default="HDFS", help="execution environment"
-    )
-    parser.add_argument("query", help="SQL query")
-
-    args = parser.parse_args()
-
-    # Assuming the default environment.
-    env = ra2mr.ExecEnv.HDFS
-
-    if args.env == "LOCAL":
-        clear_local_tmpfiles()
-        env = ra2mr.ExecEnv.LOCAL
-
     dd = {}
     dd["PART"] = {
         "P_PARTKEY": "integer",
@@ -137,8 +121,42 @@ if __name__ == "__main__":
         "PS_SUPPLYCOST": "float",
         "PS_COMMENT": "string",
     }
+    query = (
+        # "select distinct C_NAME, C_ADDRESS from CUSTOMER where C_CUSTKEY=42 "
+        # "select distinct C.C_NAME, C.C_ADDRESS from CUSTOMER C where C.C_NATIONKEY=7"
+        # "select distinct * from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_NAME='GERMANY' "
+        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_NAME='GERMANY' "
+        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and CUSTOMER.C_CUSTKEY=42"
+        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION, REGION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_REGIONKEY = REGION.R_REGIONKEY"
+        # "select distinct CUSTOMER.C_CUSTKEY from REGION, NATION, CUSTOMER where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_REGIONKEY = REGION.R_REGIONKEY"
+        # "select distinct * from ORDERS, CUSTOMER where ORDERS.O_ORDERPRIORITY='1-URGENT' and CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY"
+        # "select distinct * from CUSTOMER,ORDERS,LINEITEM where CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY and ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY and LINEITEM.L_SHIPMODE='AIR' and CUSTOMER.C_MKTSEGMENT = 'HOUSEHOLD'"
+        "select distinct * from LINEITEM,ORDERS,CUSTOMER where CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY and ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY and LINEITEM.L_SHIPMODE='AIR' and CUSTOMER.C_MKTSEGMENT = 'HOUSEHOLD'"
+    )
+    clear_local_tmpfiles()
+    eval(0.01, ra2mr.ExecEnv.LOCAL, query, dd, True)
+    # eval(0.01, ra2mr.ExecEnv.LOCAL, query, dd, False)
+    print(str(costcounter.compute_hdfs_costs()))
+    exit()
+
+    parser = argparse.ArgumentParser(description="Calling miniHive.")
+    parser.add_argument("--O", action="store_true", help="toggle optimization on")
+    parser.add_argument("--SF", type=float, default=0, help="the TPC-H scale factor")
+    parser.add_argument(
+        "--env", choices=["HDFS", "LOCAL"], default="HDFS", help="execution environment"
+    )
+    parser.add_argument("query", help="SQL query")
+
+    args = parser.parse_args()
+
+    # Assuming the default environment.
+    env = ra2mr.ExecEnv.HDFS
+
+    if args.env == "LOCAL":
+        clear_local_tmpfiles()
+        env = ra2mr.ExecEnv.LOCAL
 
     eval(args.SF, env, args.query, dd, args.O)
 
-    if args.env == 'LOCAL':
+    if args.env == "LOCAL":
         print(str(costcounter.compute_hdfs_costs()))
