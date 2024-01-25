@@ -231,7 +231,7 @@ def folded_task_factory(raquery, step=1, env=ExecEnv.HDFS) -> OutputMixin | None
         # Fold current mapper-reducer task with all previous mapper-only tasks
         # mapper-only task will be the first task in `left_tasks` and `right_tasks`
         case JoinTask():
-            tasks_left = []
+            tasks_left: list[OutputMixin] = []
             cur_left = folded_task_factory(raquery.inputs[0], step, env)
             if cur_left == None:
                 cur_left = task_factory(raquery.inputs[0], step, env)
@@ -254,7 +254,7 @@ def folded_task_factory(raquery, step=1, env=ExecEnv.HDFS) -> OutputMixin | None
                 if cur_left == None:
                     cur_left = task_factory(ra.inputs[0], step, env)
 
-            tasks_right = []
+            tasks_right: list[OutputMixin] = []
             cur_right = folded_task_factory(raquery.inputs[1], step, env)
             if cur_right == None:
                 cur_right = task_factory(raquery.inputs[1], step, env)
@@ -279,6 +279,21 @@ def folded_task_factory(raquery, step=1, env=ExecEnv.HDFS) -> OutputMixin | None
 
             # TODO fix deps
             if len(tasks_left) > 0 or len(tasks_right) > 0:
+                # TODO edge case, same required relations
+                if len(tasks_left) > 0 and len(tasks_right) > 0:
+                    req_left = set(
+                        str(req.filename).split(".")[0]
+                        for req in tasks_left[0].requires()
+                        if isinstance(req, InputData)
+                    )
+                    req_right = set(
+                        str(req.filename).split(".")[0]
+                        for req in tasks_right[0].requires()
+                        if isinstance(req, InputData)
+                    )
+                    if len(req_left.intersection(req_right)) != 0:
+                        return None
+
                 return FoldedTask(
                     tasks_left=tasks_left,
                     tasks_right=tasks_right,
@@ -327,21 +342,26 @@ class FoldedTask(RelAlgQueryTask):
             deps_left += self.tasks_left[0].requires()
         elif len(deps_main) == 2:
             deps_left.append(deps_main[0])
-        self.keys_left |= set(
-            str(dep.filename).split(".")[0]
-            for dep in deps_left
-            if isinstance(dep, InputData)
-        )
+        for dep in deps_left:
+            match dep:
+                case InputData():
+                    self.keys_left.add(str(dep.filename).split(".")[0])
+                case RenameTask():
+                    ra: ast.Rename = parse.one_statement_from_string(dep.querystring)
+                    self.keys_left.add(ra.relname)
 
         if len(self.tasks_right) != 0:
             deps_right += self.tasks_right[0].requires()
         elif len(deps_main) == 2:
             deps_right.append(deps_main[1])
-        self.keys_right |= set(
-            str(dep.filename).split(".")[0]
-            for dep in deps_right
-            if isinstance(dep, InputData)
-        )
+        for dep in deps_right:
+            match dep:
+                case InputData():
+                    self.keys_right.add(str(dep.filename).split(".")[0])
+                case RenameTask():
+                    ra: ast.Rename = parse.one_statement_from_string(dep.querystring)
+                    self.keys_right.add(ra.relname)
+
         deps: list[OutputMixin] = deps_left + deps_right
         deps += [] if len(deps) != 0 else self.tasks[0].requires()
         return deps

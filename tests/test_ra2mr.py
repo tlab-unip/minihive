@@ -3,7 +3,7 @@ import json
 import luigi
 import radb
 
-import ra2mr
+from src import ra2mr
 
 '''
 Requires that pytest and pytest-repeat are installed.

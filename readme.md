@@ -9,7 +9,12 @@ docker tag eb2621fb2b4f minihive-docker:latest
 
 Run with shared directory
 ```
-docker run -d --name minihive -p 2222:22 -v /home/{$USER}/schoolwork/minihive:/home/minihive/minihive minihive-docker
+docker run -d --name minihive -v /home/{$USER}/schoolwork/minihive:/home/minihive/minihive minihive-docker
+```
+
+Enter container interactively
+```
+docker exec -it minihive bash
 ```
 
 Run test command
@@ -36,20 +41,20 @@ cat testfile | ./mapper.py | sort | ./reducer.py
 
 ```
 python3 -m luigi \
-    --module m3_mr_translation.ra2mr SelectTask \
+    --module src.ra2mr SelectTask \
     --querystring "\select_{gender='female'} Person;" \
     --exec-environment LOCAL --local-scheduler
 ```
 
 ```
-python3 -m pytest m3_mr_translation/test_ra2mr.py \
+python3 -m pytest tests/test_ra2mr.py \
     -p no:warnings --show-capture=no
 ```
 
 Run optimizing task
 
 ```
-python3 m4_mr_opt/miniHive.py \
+python3 src/miniHive.py \
     --O --SF 1 --env LOCAL \
     "select distinct N_NAME from NATION"
 ```
