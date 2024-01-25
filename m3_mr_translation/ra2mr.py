@@ -71,7 +71,6 @@ def count_steps(raquery):
 
 
 class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
-
     """
     Each physical operator knows its (partial) query string.
     As a string, the value of this parameter can be searialized
@@ -99,6 +98,8 @@ class RelAlgQueryTask(luigi.contrib.hadoop.JobTask, OutputMixin):
             filename = "tmp" + str(self.step) + ".tmp"
         return self.get_output(filename)
 
+    optimize = luigi.BoolParameter(default=False)
+
     def inner_mapper(self, key, value) -> tuple | None:
         return (key, value)
 
@@ -112,83 +113,12 @@ this produces a tree of luigi tasks with the physical query operators.
 """
 
 
-def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False):
+def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False) -> OutputMixin:
     assert isinstance(raquery, radb.ast.Node)
-
     if optimize:
-        last = task_factory(raquery, step, env)
-        tasks: list[RelAlgQueryTask] = [last]
-        match last:
-            case SelectTask() | RenameTask():
-                cur_first = task_factory(raquery.inputs[0], step, env)
-                while True:
-                    match cur_first:
-                        # Fold map only jobs
-                        case SelectTask() | RenameTask():
-                            tasks.insert(0, cur_first)
-                        # Fold map+reduce job at the beginning
-                        case JoinTask() | ProjectTask():
-                            # TODO Fold a folded task
-                            tasks.insert(0, cur_first)
-                            break
-                        case _:
-                            break
-                    ra = parse.one_statement_from_string(cur_first.querystring)
-                    cur_first = task_factory(ra.inputs[0], step, env)
-                if len(tasks) > 1:
-                    return FoldedTask(
-                        tasks=tasks,
-                        step=step,
-                        querystring=str(raquery) + ";",
-                        exec_environment=env,
-                    )
-            case ProjectTask():
-                cur_first = task_factory(raquery.inputs[0], step, env)
-                while True:
-                    match cur_first:
-                        # Fold map only jobs
-                        case SelectTask() | RenameTask():
-                            tasks.insert(0, cur_first)
-                        case _:
-                            break
-                    ra = parse.one_statement_from_string(cur_first.querystring)
-                    cur_first = task_factory(ra.inputs[0], step, env)
-                if len(tasks) > 1:
-                    return FoldedTask(
-                        tasks=tasks,
-                        step=step,
-                        querystring=str(raquery) + ";",
-                        exec_environment=env,
-                    )
-            case JoinTask():
-                tasks_left = []
-                cur_left = task_factory(raquery.inputs[0], step, env)
-                while isinstance(cur_left, SelectTask) or isinstance(
-                    cur_left, RenameTask
-                ):
-                    tasks_left.insert(0, cur_left)
-                    ra = parse.one_statement_from_string(cur_left.querystring)
-                    cur_right = task_factory(ra.inputs[0], step, env)
-
-                tasks_right = []
-                cur_right = task_factory(raquery.inputs[1], step, env)
-                while isinstance(cur_right, SelectTask) or isinstance(
-                    cur_right, RenameTask
-                ):
-                    tasks_right.insert(0, cur_left)
-                    ra = parse.one_statement_from_string(cur_right.querystring)
-                    cur_right = task_factory(ra.inputs[0], step, env)
-
-                # TODO nest folded task
-                if len(tasks_left) > 0 and len(tasks_right) > 0:
-                    return FoldedTask(
-                        tasks_left=tasks_left,
-                        tasks_right=tasks_right,
-                        tasks=tasks,
-                        step=step,
-                        querystring=str(raquery) + ";",
-                        exec_environment=env,
-                    )
+        task = folded_task_factory(raquery, step, env)
+        if task != None:
+            return task
 
     match raquery:
         case ast.Select():
@@ -196,6 +126,7 @@ def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False):
                 querystring=str(raquery) + ";",
                 step=step,
                 exec_environment=env,
+                optimize=optimize,
             )
         case ast.RelRef():
             filename = raquery.rel + ".json"
@@ -205,18 +136,21 @@ def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False):
                 querystring=str(raquery) + ";",
                 step=step,
                 exec_environment=env,
+                optimize=optimize,
             )
         case ast.Project():
             return ProjectTask(
                 querystring=str(raquery) + ";",
                 step=step,
                 exec_environment=env,
+                optimize=optimize,
             )
         case ast.Rename():
             return RenameTask(
                 querystring=str(raquery) + ";",
                 step=step,
                 exec_environment=env,
+                optimize=optimize,
             )
         case _:
             raise Exception(
@@ -224,43 +158,230 @@ def task_factory(raquery, step=1, env=ExecEnv.HDFS, optimize=False):
             )
 
 
+def folded_task_factory(raquery, step=1, env=ExecEnv.HDFS) -> OutputMixin | None:
+    # From top to bottom
+    last = task_factory(raquery, step, env)
+    tasks: list[OutputMixin] = [last]
+    match last:
+        # Fold current and all previous mapper-only tasks
+        # mapper-reducer task will be the first task in `tasks`
+        case SelectTask() | RenameTask():
+            cur_first = folded_task_factory(raquery.inputs[0], step, env)
+            if cur_first == None:
+                cur_first = task_factory(raquery.inputs[0], step, env)
+            while True:
+                match cur_first:
+                    case SelectTask() | RenameTask():
+                        tasks.insert(0, cur_first)
+                    case FoldedTask():
+                        if cur_first.reducer_tasks != None:
+                            cur_first.reducer_tasks += tasks
+                            cur_first.reducer = cur_first._reducer
+                            return cur_first
+                        else:
+                            cur_first.mapper_tasks += tasks
+                            return cur_first
+                    case JoinTask() | ProjectTask():
+                        tasks.insert(0, cur_first)
+                        break
+                    case _:
+                        break
+                ra = parse.one_statement_from_string(cur_first.querystring)
+                cur_first = folded_task_factory(ra.inputs[0], step, env)
+                if cur_first == None:
+                    cur_first = task_factory(ra.inputs[0], step, env)
+            if len(tasks) > 1:
+                return FoldedTask(
+                    tasks=tasks,
+                    step=step,
+                    querystring=str(raquery) + ";",
+                    exec_environment=env,
+                )
+        # Fold current mapper-reducer task with all previous mapper-only tasks
+        # mapper-only task will be the first task in `tasks`
+        case ProjectTask():
+            cur_first = folded_task_factory(raquery.inputs[0], step, env)
+            if cur_first == None:
+                cur_first = task_factory(raquery.inputs[0], step, env)
+            while True:
+                match cur_first:
+                    case SelectTask() | RenameTask():
+                        tasks.insert(0, cur_first)
+                    case FoldedTask():
+                        if cur_first.reducer_tasks == None:
+                            cur_first.mapper_tasks += tasks
+                            cur_first.reducer_tasks = tasks[-1:]
+                            cur_first.reducer = cur_first._reducer
+                            return cur_first
+                        else:
+                            break
+                    case _:
+                        break
+                ra = parse.one_statement_from_string(cur_first.querystring)
+                cur_first = folded_task_factory(ra.inputs[0], step, env)
+                if cur_first == None:
+                    cur_first = task_factory(ra.inputs[0], step, env)
+            if len(tasks) > 1:
+                return FoldedTask(
+                    tasks=tasks,
+                    step=step,
+                    querystring=str(raquery) + ";",
+                    exec_environment=env,
+                )
+        # Fold current mapper-reducer task with all previous mapper-only tasks
+        # mapper-only task will be the first task in `left_tasks` and `right_tasks`
+        case JoinTask():
+            tasks_left = []
+            cur_left = folded_task_factory(raquery.inputs[0], step, env)
+            if cur_left == None:
+                cur_left = task_factory(raquery.inputs[0], step, env)
+            while True:
+                match cur_left:
+                    case SelectTask() | RenameTask():
+                        tasks_left.insert(0, cur_left)
+                    case FoldedTask():
+                        if cur_left.reducer_tasks == None:
+                            cur_left.mapper_tasks += tasks_left
+                            cur_left.reducer_tasks = tasks_left[-1:]
+                            cur_left.reducer = cur_left._reducer
+                            return cur_left
+                        else:
+                            break
+                    case _:
+                        break
+                ra = parse.one_statement_from_string(cur_left.querystring)
+                cur_left = folded_task_factory(ra.inputs[0], step, env)
+                if cur_left == None:
+                    cur_left = task_factory(ra.inputs[0], step, env)
+
+            tasks_right = []
+            cur_right = folded_task_factory(raquery.inputs[1], step, env)
+            if cur_right == None:
+                cur_right = task_factory(raquery.inputs[1], step, env)
+            while True:
+                match cur_right:
+                    case SelectTask() | RenameTask():
+                        tasks_right.insert(0, cur_right)
+                    case FoldedTask():
+                        if cur_right.reducer_tasks == None:
+                            cur_right.mapper_tasks += tasks_right
+                            cur_right.reducer_tasks = tasks_right[-1:]
+                            cur_right.reducer = cur_right._reducer
+                            return cur_right
+                        else:
+                            break
+                    case _:
+                        break
+                ra = parse.one_statement_from_string(cur_right.querystring)
+                cur_right = folded_task_factory(ra.inputs[0], step, env)
+                if cur_right == None:
+                    cur_right = task_factory(ra.inputs[0], step, env)
+
+            # TODO fix deps
+            if len(tasks_left) > 0 or len(tasks_right) > 0:
+                return FoldedTask(
+                    tasks_left=tasks_left,
+                    tasks_right=tasks_right,
+                    tasks=tasks,
+                    step=step,
+                    querystring=str(raquery) + ";",
+                    exec_environment=env,
+                )
+    return None
+
+
 class FoldedTask(RelAlgQueryTask):
     tasks: list[RelAlgQueryTask] = luigi.Parameter(default=[])
-    # For handing join task
+    # For handing join task (only at the mapper stage)
     tasks_left: list[RelAlgQueryTask] = luigi.Parameter(default=[])
     tasks_right: list[RelAlgQueryTask] = luigi.Parameter(default=[])
-    # For handling different branch
-    rels_left: set[str] = luigi.Parameter(default={})
-    rels_right: set[str] = luigi.Parameter(default={})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        reducer_task = [task for task in self.tasks if task.reducer != NotImplemented]
-        if len(reducer_task) != 0:
+        # For handling different branches (only at the mapper stage)
+        # Default by relation name
+        self.keys_left = set[str]()
+        self.keys_right = set[str]()
+        self.tasks = list(self.tasks)
+
+        indices = [
+            i for i, task in enumerate(self.tasks) if task.reducer != NotImplemented
+        ]
+        self.mapper_tasks: list[RelAlgQueryTask] = self.tasks
+        self.reducer_tasks = None
+        if len(indices) != 0:
+            assert len(indices) == 1
             self.reducer = self._reducer
+            self.mapper_tasks = self.tasks[: indices[0] + 1]
+            self.reducer_tasks = self.tasks[indices[0] :]
 
     def requires(self):
-        deps_left: list[RelAlgQueryTask] = (
-            [] if len(self.tasks_left) == 0 else self.tasks_left[0].requires()
+        # Dependent tasks from deepest task after conditional branches
+        deps_main = self.tasks[0].requires()
+        # Dependent tasks from deepest task in conditional branches
+        deps_left: list[OutputMixin] = []
+        deps_right: list[OutputMixin] = []
+
+        # Find relation name in dependent tasks
+        if len(self.tasks_left) != 0:
+            deps_left += self.tasks_left[0].requires()
+        elif len(deps_main) == 2:
+            deps_left.append(deps_main[0])
+        self.keys_left |= set(
+            str(dep.filename).split(".")[0]
+            for dep in deps_left
+            if isinstance(dep, InputData)
         )
-        deps_right: list[RelAlgQueryTask] = (
-            [] if len(self.tasks_right) == 0 else self.tasks_right[0].requires()
+
+        if len(self.tasks_right) != 0:
+            deps_right += self.tasks_right[0].requires()
+        elif len(deps_main) == 2:
+            deps_right.append(deps_main[1])
+        self.keys_right |= set(
+            str(dep.filename).split(".")[0]
+            for dep in deps_right
+            if isinstance(dep, InputData)
         )
-        self.rels_left |= set(
-            str(dep.filename) for dep in deps_left if isinstance(dep, InputData)
-        )
-        self.rels_right |= set(
-            str(dep.filename) for dep in deps_right if isinstance(dep, InputData)
-        )
-        deps: list[RelAlgQueryTask] = deps_left + deps_right
+        deps: list[OutputMixin] = deps_left + deps_right
         deps += [] if len(deps) != 0 else self.tasks[0].requires()
         return deps
 
+    def inner_mapper(self, key, value) -> tuple | None:
+        """
+        if key is in left deps, execute all mappers in left tasks.
+        else if key in right deps, execute all mappers in right tasks.
+        finally, execute all mappers before the reducer task
+        """
+        if len(self.tasks_left) != 0 or len(self.tasks_right) != 0:
+            # TODO fix cases
+            match key:
+                case key if key in self.keys_left:
+                    for task in self.tasks_left:
+                        res = task.inner_mapper(key, value)
+                        if res == None:
+                            return
+                        key, value = res
+                case key if key in self.keys_right:
+                    for task in self.tasks_right:
+                        res = task.inner_mapper(key, value)
+                        if res == None:
+                            return
+                        key, value = res
+
+        for task in self.mapper_tasks:
+            res = task.inner_mapper(key, value)
+            if res == None:
+                return
+            key, value = res
+        return key, value
+
     def inner_reducer(self, key, values) -> tuple[str, list]:
-        # Only the first reducer encountered will be executed
-        # Then the mapper of following tasks will be executed
+        """
+        Execute the first and only reducer in tasks
+        and any mapper in following tasks
+        """
         flag = False
-        for task in self.tasks:
+        for task in self.reducer_tasks:
             if flag:
                 new_values = []
                 for value in values:
@@ -281,30 +402,9 @@ class FoldedTask(RelAlgQueryTask):
 
     def mapper(self, line):
         key, value = line.split("\t")
-        if len(self.tasks_left) != 0 and len(self.tasks_right) != 0:
-            ra_left: ast.RelExpr = parse.one_statement_from_string(
-                self.tasks_left[0].querystring
-            )
-            # TODO Make sure deepest left is relation name
-            assert len(ra_left.inputs) == 1
-            assert isinstance(ra_left.inputs[0], ast.RelRef)
-            self.rels_left.append(ra_left.inputs[0].rel)
-            if key in self.rels_left:
-                for task in self.tasks_left:
-                    key, value = task.inner_mapper(key, value)
-            else:
-                for task in self.tasks_right:
-                    key, value = task.inner_mapper(key, value)
-
-            # yield key, value
-            # return
-
-        for task in self.tasks:
-            res = task.inner_mapper(key, value)
-            if res == None:
-                return
-            key, value = res
-        yield (key, value)
+        result = self.inner_mapper(key, value)
+        if result != None:
+            yield result
 
 
 class JoinTask(RelAlgQueryTask):
@@ -317,12 +417,16 @@ class JoinTask(RelAlgQueryTask):
         assert isinstance(raquery, radb.ast.Join)
 
         task1 = task_factory(
-            raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+            raquery.inputs[0],
+            step=self.step + 1,
+            env=self.exec_environment,
+            optimize=self.optimize,
         )
         task2 = task_factory(
             raquery.inputs[1],
             step=self.step + count_steps(raquery.inputs[0]) + 1,
             env=self.exec_environment,
+            optimize=self.optimize,
         )
 
         return [task1, task2]
@@ -360,7 +464,7 @@ class JoinTask(RelAlgQueryTask):
                         for key in json_tuple.keys()
                         if key.split(".")[1] == input.name
                     ]
-
+        # Value of the attribute, will be used as key
         rel_vals = [
             json_tuple.get(attr) for attr in attrs if json_tuple.get(attr) != None
         ]
@@ -391,11 +495,6 @@ class JoinTask(RelAlgQueryTask):
                 rels[index].append(json_tuple)
 
         assert len(rels) == 2
-
-        # for tuple1 in rels[0]:
-        #     for tuple2 in rels[1]:
-        #         new_tuple = dict(list(tuple1.items()) + list(tuple2.items()))
-        #         return (key, json.dumps(new_tuple))
         values = [
             json.dumps(dict(list(tuple1.items()) + list(tuple2.items())))
             for tuple1 in rels[0]
@@ -532,7 +631,10 @@ class ProjectTask(RelAlgQueryTask):
 
         return [
             task_factory(
-                raquery.inputs[0], step=self.step + 1, env=self.exec_environment
+                raquery.inputs[0],
+                step=self.step + 1,
+                env=self.exec_environment,
+                optimize=self.optimize,
             )
         ]
 
