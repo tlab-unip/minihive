@@ -45,23 +45,68 @@ def eval(
     return task
 
 
-def _local_test(dd: dict):
-    query = (
-        "select distinct C_NAME, C_ADDRESS from CUSTOMER where C_CUSTKEY=42 "
-        # "select distinct C.C_NAME, C.C_ADDRESS from CUSTOMER C where C.C_NATIONKEY=7"
-        # "select distinct * from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_NAME='GERMANY' "
-        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_NAME='GERMANY' "
-        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and CUSTOMER.C_CUSTKEY=42"
-        # "select distinct CUSTOMER.C_CUSTKEY from CUSTOMER, NATION, REGION where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_REGIONKEY = REGION.R_REGIONKEY"
-        # "select distinct CUSTOMER.C_CUSTKEY from REGION, NATION, CUSTOMER where CUSTOMER.C_NATIONKEY=NATION.N_NATIONKEY and NATION.N_REGIONKEY = REGION.R_REGIONKEY"
-        # "select distinct * from ORDERS, CUSTOMER where ORDERS.O_ORDERPRIORITY='1-URGENT' and CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY"
-        # "select distinct * from CUSTOMER,ORDERS,LINEITEM where CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY and ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY and LINEITEM.L_SHIPMODE='AIR' and CUSTOMER.C_MKTSEGMENT = 'HOUSEHOLD'"
-        # "select distinct * from LINEITEM,ORDERS,CUSTOMER where CUSTOMER.C_CUSTKEY=ORDERS.O_CUSTKEY and ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY and LINEITEM.L_SHIPMODE='AIR' and CUSTOMER.C_MKTSEGMENT = 'HOUSEHOLD'"
+def build_dbgen(dbgen_dir):
+    import subprocess
+
+    p = subprocess.Popen(
+        ["make", "-f", os.path.join(dbgen_dir, "makefile")], cwd=dbgen_dir
     )
-    clear_local_tmpfiles()
-    eval(0.01, ra2mr.ExecEnv.LOCAL, query, dd, True)
-    # eval(0.01, ra2mr.ExecEnv.LOCAL, query, dd, False)
-    print(str(costcounter.compute_hdfs_costs()))
+    p.communicate()
+    return p.returncode
+
+
+def inner_generate_data(
+    data_dir, dbgen_dir, file_pattern, out_ext, dd: dict[str, dict[str, str]]
+):
+    import re
+    import json
+
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        for in_fname in glob.glob(os.path.join(dbgen_dir, file_pattern)):
+            fname: str = os.path.basename(in_fname).split(".")[0].upper()
+            out_fname = os.path.join(data_dir, fname + out_ext)
+            try:
+                with open(in_fname) as in_file, open(out_fname, "w") as out_file:
+                    for inline in in_file:
+                        keys = list(dd[fname].keys())
+                        values = re.sub("\|$", "", inline).split("|")
+                        new_values: list[str | int | float] = []
+                        for i, value in enumerate(values):
+                            if dd[fname][keys[i]] == "integer":
+                                new_values.append(int(value))
+                            elif dd[fname][keys[i]] == "float":
+                                new_values.append(float(value))
+                            else:
+                                new_values.append(value)
+                        new_keys = map(lambda key: fname + "." + key, keys)
+                        outline = (
+                            fname
+                            + "\t"
+                            + json.dumps(dict(zip(new_keys, new_values)))
+                            + "\n"
+                        )
+                        out_file.write(outline)
+                os.remove(in_fname)
+            except:
+                return 1
+    except:
+        return 1
+    return 0
+
+
+def generate_data(dbgen_dir, data_dir, sf: float, dd: dict[str, dict[str, str]]):
+    import subprocess
+
+    p = subprocess.Popen(
+        [os.path.join(".", "dbgen"), "-vf", "-s", str(sf)], cwd=dbgen_dir
+    )
+    p.communicate()
+    if not p.returncode:
+        if inner_generate_data(data_dir, dbgen_dir, "*.tbl", ".json", dd):
+            return 1
+    else:
+        return p.returncode
 
 
 if __name__ == "__main__":
@@ -139,8 +184,6 @@ if __name__ == "__main__":
         "PS_SUPPLYCOST": "float",
         "PS_COMMENT": "string",
     }
-    # _local_test(dd)
-    # exit()
 
     parser = argparse.ArgumentParser(description="Calling miniHive.")
     parser.add_argument("--O", action="store_true", help="toggle optimization on")
@@ -158,6 +201,20 @@ if __name__ == "__main__":
     if args.env == "LOCAL":
         clear_local_tmpfiles()
         env = ra2mr.ExecEnv.LOCAL
+
+        # Path to dbgen
+        dbgen_dir = os.path.join("/home/minihive/tpch-hive", "dbgen")
+        dbgen_dir = (
+            os.path.join(os.getcwd(), "dbgen")
+            if not os.path.exists(dbgen_dir)
+            else dbgen_dir
+        )
+        if os.path.exists(dbgen_dir):
+            data_dir = os.getcwd()
+            if build_dbgen(dbgen_dir):
+                exit(1)
+            if generate_data(dbgen_dir, data_dir, args.SF, dd):
+                exit(1)
 
     eval(args.SF, env, args.query, dd, args.O)
 
