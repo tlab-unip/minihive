@@ -691,34 +691,3 @@ class ProjectTask(RelAlgQueryTask):
         key, values = self.inner_reducer(key, values)
         for value in values:
             yield key, value
-
-
-if __name__ == "__main__":
-    import luigi.mock as mock
-    from test_ra2mr import prepareMockFileSystem
-
-    prepareMockFileSystem()
-
-    querystring = (
-        "\project_{A.name, B.name} "
-        "((\\rename_{A: *} Eats) \join_{A.pizza = B.pizza} (\\rename_{B: *} Eats));"
-    )
-
-    raquery = radb.parse.one_statement_from_string(querystring)
-    task = task_factory(raquery, env=ExecEnv.MOCK)
-    luigi.build([task], local_scheduler=True)
-
-    data_list = mock.MockFileSystem().listdir("")
-    print(data_list)
-
-    f = lambda _task: [
-        f(_dep) or print(_dep) for _dep in _task.deps() if isinstance(_dep, luigi.Task)
-    ]
-    f(task)
-
-    _output = []
-    with task.output().open("r") as f:
-        for line in f:
-            _output.append(line)
-    print("".join("{}: {}".format(*k) for k in enumerate(_output)))
-    print(len(_output))
